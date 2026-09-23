@@ -27,7 +27,7 @@ src = ["."]
 # UI 測試刻意用「在 fixture 裡 lazy import Qt 再注入 globals」的寫法，於是
 # ruff 在 `tests/` 上會報一大片 F821「這個名字不存在」—— 全部是誤報，而它們
 # 會把真的那幾條淹掉。
-include = ["pitchapp/**/*.py", "main.py"]
+include = ["pitchapp/**/*.py", "main.py", "tools/**/*.py"]
 
 [tool.ruff.lint]
 # E4 import、E7 語句、E9 語法、F pyflakes、W 空白、B bugbear、

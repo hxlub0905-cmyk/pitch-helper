@@ -56,6 +56,34 @@ QT_QPA_PLATFORM=offscreen python -m pytest -q     # 141 條（Windows 不用設�
 * 不要寫死視窗尺寸，用 `ui/fit_screen.fit()`
 * **同一件事只寫在一個地方** —— 抄出來的第二份一定會漂
 
+## 拿不到 git 的機器（廠內）
+
+廠內那台機器不能跑 git、也不能下載任何東西，但**看得到 GitHub 上的檔案並且
+可以複製**。所以整個 repo 另外打成**一個純文字 `.py`**：
+
+1. 在 GitHub 上開 [`bundle/pitch_helper_bundle.py`](bundle/pitch_helper_bundle.py)，按複製鈕（或複製 raw）
+2. 貼進記事本，存成 `pitch_helper_bundle.py`
+3. `python pitch_helper_bundle.py` —— 它會解到 `.\pitch-helper\`
+   （`--dest` 換地方、`--list` 只看內容不寫檔）
+
+⚠ **整個包是純 ASCII**，一個非 ASCII 位元組都沒有。理由是來源專案踩過的：
+中文 Windows 的記事本存檔是 ANSI（cp950），包裡只要有中文就會被存壞，而
+Python 讀不動整個檔案（`SyntaxError: Non-UTF-8 code starting with '\xe5'`）。
+每個檔案都帶著 git blob SHA，對不上就**一個檔案都不寫**。
+
+更新的時候不必整包重來：`tools/FILELIST.txt` 是全部檔案的 SHA（幾 KB），
+複製它再跑 `python tools/check_files.py`，它會說剩下要複製哪幾個。
+
+**改完程式碼之後（在有 git 的機器上）要重產那兩個檔案**：
+
+```bash
+git add -A && python tools/release.py && git add -A
+```
+
+⚠ `git add` 要在**前面** —— 兩個產出都是從 `git ls-files` 產的，還沒 add 的
+新檔案會**安靜地不在裡面**。忘了跑不會有任何症狀，直到廠內那台機器上少一個
+檔案；`tests/test_bundle.py` 會在它們過期的時候變紅。
+
 ## 授權
 
 專有／內部使用 —— 見 [`LICENSE`](LICENSE)。
