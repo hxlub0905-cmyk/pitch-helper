@@ -1,0 +1,89 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # ruff 是**一份**答案，跟 Python 版本無關 —— 所以它自己一個 job，不跟著
+  # 下面那個 3×矩陣跑三次。它也不依賴 numpy/Qt，所以幾秒就有結果。
+  # ⚠ 版本釘住，理由見 `pyproject.toml` 的 `[project.optional-dependencies]`。
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install ruff==0.15.8
+      # 掃哪些路徑、開哪些規則 —— 全部在 pyproject.toml 的 `[tool.ruff]`，
+      # 這裡刻意不重複一份（會漂）。
+      - run: ruff check --output-format=github
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.9 是底線（廠內機器可能是舊版），3.12 是上緣。
+        python-version: ["3.9", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install system deps for Qt (offscreen)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libdbus-1-3 \
+                                  libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 \
+                                  libxcb-shape0 libxcb-xinerama0
+
+      - name: Install Python deps
+        # ⚠ 這一行是 requirements.txt 的鏡像，只換一個東西：opencv-python ->
+        # opencv-python-headless（runner 上沒有顯示裝置）。**加相依套件時兩邊
+        # 都要改** —— 下面那一步會擋住漏掉的情況。
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy opencv-python-headless tifffile PySide6 pytest
+
+      - name: Check the install list still covers requirements.txt
+        # 與其靠人記得，不如讓 CI 自己發現：requirements.txt 有、CI 沒有的那個
+        # 套件，會在某一支測試上紅而本機全綠。
+        run: |
+          python - <<'PY'
+          import re, sys, importlib.util
+          names = []
+          for line in open("requirements.txt", encoding="utf-8"):
+              line = line.strip()
+              if line and not line.startswith("#"):
+                  names.append(re.split(r"[<>=!~\[]", line, 1)[0].strip())
+          IMPORT_NAME = {"opencv-python": "cv2"}
+          missing = [n for n in names
+                     if importlib.util.find_spec(IMPORT_NAME.get(n, n)) is None]
+          if missing:
+              sys.exit("requirements.txt lists %s but CI did not install them; "
+                       "add them to the 'Install Python deps' step." % missing)
+          print("all of requirements.txt is importable:", names)
+          PY
+
+      # ⚠ **UI 測試一個檔案一個行程。** Qt 物件在單一 pytest 行程裡不會消失，
+      # 時間是超線性的 —— 來源專案實測過一個行程 1:39:09、分批 7 分鐘。
+      # 這個 repo 現在只有兩支測試檔，但寫法先擺對，長大之後不必回頭改。
+      - name: Run tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          fail=0
+          for f in tests/test_*.py; do
+            echo "::group::$f"
+            python -m pytest -q "$f" || fail=1
+            echo "::endgroup::"
+          done
+          exit $fail

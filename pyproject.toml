@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pitch-helper"
+version = "0.1.0.dev0"
+description = "Pitch helper: measure the repeating cell period of a layout from a single image"
+requires-python = ">=3.9"
+# 授權沿用來源專案（專有／內部使用）—— 全文在 repo 根的 `LICENSE`。
+license = {file = "LICENSE"}
+dependencies = ["numpy>=1.24", "opencv-python>=4.8", "tifffile>=2023.7", "PySide6>=6.5"]
+
+[project.optional-dependencies]
+# ⚠ 版本釘死，理由同 `.github/workflows/ci.yml`：浮動版本＝某天早上 CI 自己
+# 紅了，而沒有人改過任何一行。要升級就改這一行，那一次的 diff 就是「新規則
+# 抓到什麼」。
+dev = ["pytest>=8.2", "ruff==0.15.8"]
+
+# --------------------------------------------------------------------------- #
+# ruff —— 從 d4t 帶過來的設定（同一套慣例）
+# --------------------------------------------------------------------------- #
+[tool.ruff]
+target-version = "py39"          # 廠內機器可能是舊版 Python
+src = ["."]
+# **只掃出貨的程式碼。** `tests/` 不在裡面，而那是帶過來的決定不是漏掉：
+# UI 測試刻意用「在 fixture 裡 lazy import Qt 再注入 globals」的寫法，於是
+# ruff 在 `tests/` 上會報一大片 F821「這個名字不存在」—— 全部是誤報，而它們
+# 會把真的那幾條淹掉。
+include = ["pitchapp/**/*.py", "main.py"]
+
+[tool.ruff.lint]
+# E4 import、E7 語句、E9 語法、F pyflakes、W 空白、B bugbear、
+# RUF100（沒作用的 `noqa`）。**刻意沒有 E501（行長）**：中文一個字佔兩個欄寬，
+# 「字元數」在這個 repo 量不到「看起來多寬」。**刻意沒有 UP（pyupgrade）**：
+# 它會把 `Dict[str, int]` 改寫成 `dict[str, int]` 那一族，換來的只有寫法新舊。
+select = ["E4", "E7", "E9", "F", "W", "B", "RUF100"]
+# E702（一行兩個分號隔開的敘述）：陣列數學裡成對出現的那種排版讓「這兩件事
+# 是一對」看得出來，拆開反而更難讀。
+ignore = ["E702"]
+
+[tool.ruff.lint.per-file-ignores]
+# 套件的 `__init__.py` 是純轉出口，F401「import 了沒用到」在那裡問錯了問題。
+"**/__init__.py" = ["F401"]
+
+[tool.ruff.lint.flake8-bugbear]
+# Qt 的 model API 簽章就是 `def rowCount(self, parent=QModelIndex())` ——
+# 那是 PySide6 要求的形狀，不是 B008 想抓的「可變預設值」。
+extend-immutable-calls = ["PySide6.QtCore.QModelIndex"]
