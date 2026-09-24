@@ -412,15 +412,44 @@ def test_typing_a_period_redraws_the_grid_at_once(win, ph):
     assert win.view.overlay_count() < before
 
 
-def test_the_double_button_doubles_both_axes(win, ph):
-    """使用者的真實情境：「兩根 MG 才構成他要比的那個單元」。"""
+def test_each_axis_doubles_on_its_own(win, ph):
+    """使用者的真實情境：「兩根 MG 才構成他要比的那個單元」—— 那是**一軸**的事。
+
+    ⚠ 2026-09-24 以前這一顆兩軸一起加倍（這條測試本來斷言 120 × 88）。最常見的
+    取錯是只有一軸差一倍：每隔一根 fin 才有一個 contact，量到 20 × 45、真的是
+    40 × 45 —— 兩軸一起加倍給 40 × 90，永遠到不了。使用者 2026-09-24：
+    「×2 可以只加倍 X 或只加倍 Y」。
+    """
     from pitchapp.core.algo import template as algo_template
 
     img = tiles(px=60, py=44)
     win.set_image(img, "synthetic.tif")
     win._on_done(algo_template.measure_period(img), None, "")
-    win._on_double()
-    assert [r[1] for r in win.rows()] == ["120", "88"]
+    # 畫面上那一顆，不是只有方法。⚠ 先按：按下去會開始重疊，而重疊的時候
+    # 它跟其他控制項一樣是灰的（按不出結果的東西要看起來按不出結果）。
+    win._double_buttons[1].click()
+    assert [r[1] for r in win.rows()] == ["60", "88"]
+    win._on_double(0)
+    assert [r[1] for r in win.rows()] == ["120", "88"], "另一軸打過的值要留著"
+    win._on_reset()
+    win._on_double(0)
+    assert [r[1] for r in win.rows()] == ["120", "44"]
+
+
+def test_the_double_buttons_live_on_their_axis_rows(win, ph):
+    """一軸一顆，住在那一軸自己那一列 —— X only 的時候 Y 那一顆跟著整列不見；
+    還沒量到數字的時候按不出結果，所以是灰的。"""
+    from pitchapp.core.algo import template as algo_template
+
+    img = tiles(px=60, py=44)
+    win.set_image(img, "synthetic.tif")
+    assert not any(b.isEnabled() for b in win._double_buttons), "還沒有數字可以翻倍"
+    win._on_done(algo_template.measure_period(img), None, "")
+    assert all(b.isEnabled() for b in win._double_buttons)
+    win.chips_axis.set_text(ph.AXIS_X)
+    win._on_axis(ph.AXIS_X)
+    assert win._double_buttons[0].isVisibleTo(win)
+    assert not win._double_buttons[1].isVisibleTo(win), "Y 沒在用，Y 的 ×2 也不見"
 
 
 def test_reset_puts_the_measured_period_back(win, ph):
@@ -429,7 +458,8 @@ def test_reset_puts_the_measured_period_back(win, ph):
     img = tiles(px=60, py=44)
     win.set_image(img, "synthetic.tif")
     win._on_done(algo_template.measure_period(img), None, "")
-    win._on_double()
+    win._on_double(0)
+    win._on_double(1)
     win._on_reset()
     assert [r[1] for r in win.rows()] == ["60", "44"]
     assert win.override() == (None, None)
@@ -2166,3 +2196,99 @@ def test_a_fractional_period_keeps_its_cell_sharp_when_edges_are_skipped(ph):
     assert gc.agreement >= before[0] - 0.01, (before[0], gc.agreement)
     corr = np.corrcoef(before[1], gc.cell.astype(float).ravel())[0, 1]
     assert corr > 0.99, "剪完之後疊出來的要是同一格（同一個相位）"
+
+
+# --------------------------------------------------------------------------- #
+# 15. 狀態燈只為疑點亮黃、候選有 ×3（2026-09-24，複雜 pattern 驗算之後）
+# --------------------------------------------------------------------------- #
+def _staggered(w=900, h=700, seed=0):
+    """每一列錯半格：真的單元 40 × 70，引擎要自己換量法才答得出來。"""
+    import cv2
+    rng = np.random.default_rng(seed)
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float64)
+    xs = xx + 20 * (np.floor(yy / 35) % 2)
+    img = (70 + 120 * ((((xs % 40) - 20) ** 2 + ((yy % 35) - 17) ** 2) < 64)).astype(np.float64)
+    return np.clip(np.round(cv2.GaussianBlur(img, (0, 0), 1.0)
+                            + rng.normal(0, 10, (h, w))), 0, 255).astype(np.uint8)
+
+
+def test_a_correction_the_engine_got_right_does_not_turn_the_light_yellow(win, ph):
+    """⚠ **這是那個燈號改動的樣子。** 本來引擎說了任何一句話就亮黃燈 —— 量過 195 張
+    複雜 pattern：量對的有六成亮黃，量錯的反而四成打綠勾。交錯的圖上引擎換了量法、
+    加了倍，那是它**修對了**：綠燈，而它說的話收進 Details。"""
+    img = _staggered()
+    win.set_image(img, "staggered.tif")
+    win._on_done(*_run(win, img), "")
+    assert [r[1] for r in win.rows()] == ["40", "70"]
+    assert win._m.notes and not win._m.doubts
+    assert win.verdict() == (ph.TONE_GOOD, ph.VERDICT_OK), win.warn.text()
+    assert "What it decided" in win.details.text()
+
+
+def test_a_real_doubt_still_turns_it_yellow(win, ph):
+    """反向：引擎自己沒把握的那幾句（只有一種量法看到、諧波鏈不直…）照樣亮黃。"""
+    img = tiles(px=60, py=44)
+    win.set_image(img, "a.tif")
+    m, gc = _run(win, img)
+    m.doubts = ["the repeats down do not line up on a straight harmonic chain; "
+                "the period was taken from the first peak alone"]
+    m.notes = list(m.notes) + m.doubts
+    win._on_done(m, gc, "")
+    assert win.verdict() == (ph.TONE_WARN, ph.VERDICT_CHECK)
+    assert "harmonic chain" in win.warn.text()
+
+
+def test_an_answer_without_the_doubts_field_keeps_the_old_rule(win, ph):
+    """舊的（或假的）答案沒有 `doubts`：每一句都當疑點 —— 寧可多亮一次黃燈。"""
+    img = tiles(px=60, py=44)
+    win.set_image(img, "a.tif")
+    m, gc = _run(win, img)
+    fake = _M()
+    fake.notes = ["something the engine said"]
+    assert not hasattr(fake, "doubts")
+    win._m = fake
+    assert win._doubts() == ["something the engine said"]
+
+
+def test_or_try_offers_three_times(win, ph):
+    """每 3 條線才有一個 via：量到 24、真的是 72 —— 候選裡本來只有 ×2 與 ÷2。"""
+    import cv2
+    rng = np.random.default_rng(0)
+    yy, xx = np.mgrid[0:600, 0:900].astype(np.float64)
+    k = np.floor(xx / 24)
+    img = 60 + 110 * (((xx % 24) >= 7) & ((xx % 24) < 17))
+    img = img + 25 * ((k % 3 == 0) & ((xx % 24) >= 8) & ((xx % 24) < 16)
+                      & ((yy % 70) >= 31) & ((yy % 70) < 39))
+    img = np.clip(np.round(cv2.GaussianBlur(img.astype(np.float64), (0, 0), 1.0)
+                           + rng.normal(0, 8, img.shape)), 0, 255).astype(np.uint8)
+    win.set_image(img, "vias.tif")
+    win._on_done(*_run(win, img), "")
+    labels = [b.text() for b in win._try_buttons]
+    if win.rows()[0][1] == "24":                 # 引擎量到的是線距（那個 bug 本身）
+        assert labels and labels[0].startswith("72"), labels
+
+
+def test_a_candidate_leaves_the_axis_it_does_not_change_alone(win, ph):
+    """⚠ 週期欄只收一位小數：候選 ``90 × 51.96`` 只改 X，把 51.96 原樣寫進 Y
+    那一格會變成 52.0，畫面接著說「Y: yours 52 vs measured 51.96」。"""
+    img = tiles(px=60, py=44)
+    win.set_image(img, "a.tif")
+    m, gc = _run(win, img)
+    m.px, m.py = 30.0, 51.96
+    win._m = m
+    win._apply_candidate(90.0, 51.96)
+    assert win.override() == (90.0, None), win.override()
+
+
+def test_the_candidates_fit_the_narrowest_column(win, ph):
+    """×3 之後小數週期的標籤會變長（`30 × 155.88`）—— 放不下的那一顆不放，
+    不是被切掉一截。"""
+    img = tiles(px=60, py=44)
+    win.set_image(img, "a.tif")
+    m, gc = _run(win, img)
+    m.px, m.py = 30.0, 51.96
+    m.candidates = [(30, 51), (15, 51), (60, 51), (30, 25), (30, 103)]
+    win._on_done(m, gc, "")
+    used = sum(b.sizeHint().width() for b in win._try_buttons)
+    assert win._try_buttons and used + win.lab_try.sizeHint().width() <= 380, (
+        [b.text() for b in win._try_buttons], used)

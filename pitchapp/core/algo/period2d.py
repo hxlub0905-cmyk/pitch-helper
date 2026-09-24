@@ -58,11 +58,12 @@ from typing import Any, List, Optional, Tuple
 import cv2
 import numpy as np
 
+from . import golden as algo_golden
 from . import period as algo_period
 
 __all__ = ["Period2D", "HalfPeriodCheck", "estimate_period_2d", "half_period_check",
            "autocorr2d", "fmt_px", "MAX_SIDE", "FLAT_ABOVE", "PEAK_REL", "PEAK_ABS",
-           "HALF_PERIOD_GAIN"]
+           "HALF_PERIOD_GAIN", "ac_noise_fraction"]
 
 #: 只看中央這麼大的視窗（每邊）。
 MAX_SIDE = 1536
@@ -94,6 +95,9 @@ class Period2D:
     warnings: List[str] = field(default_factory=list)
     #: 算過的那張自相關面（給 `half_period_check` 省一次 FFT；不進 repr／比較）。
     ac: Optional[np.ndarray] = field(default=None, repr=False, compare=False)
+    #: 那張面的 ``ac[0, 0]`` 裡有幾成是雜訊（:func:`ac_noise_fraction`）——
+    #: 給 `half_period_check` 扣雜訊用（2026-09-24）。
+    noise_frac: float = 0.0
 
 
 @dataclass
@@ -134,6 +138,16 @@ def autocorr2d(gray: np.ndarray, max_side: int = MAX_SIDE) -> np.ndarray:
     先減掉大尺度背景（高斯模糊當低通）：亮度漸層會讓整張面往一邊翹，軸線上的
     峰就分不出來。中央視窗、零均值、FFT。
     """
+    return _autocorr_of(_hp_window(gray, max_side)[0])
+
+
+def _hp_window(gray: np.ndarray, max_side: int = MAX_SIDE
+               ) -> Tuple[np.ndarray, np.ndarray, float]:
+    """自相關看的那一塊：``(高通後, 高通前（零均值）, 高斯 sigma)``。
+
+    本來寫在 `autocorr2d` 裡；2026-09-24 拆出來，因為 :func:`ac_noise_fraction`
+    要量的是**同一塊**像素的雜訊（`autocorr2d` 的結果一個 byte 都沒變）。
+    """
     g = np.asarray(gray, np.float32)
     h, w = g.shape[:2]
     hh, ww = min(h, int(max_side)), min(w, int(max_side))
@@ -141,7 +155,11 @@ def autocorr2d(gray: np.ndarray, max_side: int = MAX_SIDE) -> np.ndarray:
     g = g[y0:y0 + hh, x0:x0 + ww]
     g = g - float(g.mean())
     sigma = max(3.0, min(hh, ww) / 16.0)
-    g = g - cv2.GaussianBlur(g, (0, 0), sigma)
+    return g - cv2.GaussianBlur(g, (0, 0), sigma), g, sigma
+
+
+def _autocorr_of(g: np.ndarray) -> np.ndarray:
+    hh, ww = g.shape
     # **補零到兩倍 = 線性自相關，不是環狀的**（F105）。F104 是環狀的：視窗不是
     # 週期的整數倍時尾巴會繞回來拉歪每一個峰 —— 合成的 41 × 79.5 晶格在 800 px
     # 高的視窗上，四個 Y 諧波的次像素位置是 79.59、159.17、238.92、318.47
@@ -153,6 +171,30 @@ def autocorr2d(gray: np.ndarray, max_side: int = MAX_SIDE) -> np.ndarray:
     overlap = np.outer(hh - np.arange(hh), ww - np.arange(ww)).astype(np.float64)
     ac = ac * (float(hh * ww) / overlap)
     return ac / max(float(ac[0, 0]), 1e-9)
+
+
+def ac_noise_fraction(hp: np.ndarray, raw: np.ndarray, sigma: float) -> float:
+    """自相關的原點值 ``ac[0, 0]`` 裡有幾成是**雜訊**（0–1）。
+
+    為什麼（2026-09-24）
+    --------------------
+    自相關正規化成 ``ac[0, 0] = 1``。像素之間獨立的雜訊只加在原點那一格（平移
+    任何一格之後，雜訊跟自己就不再對得上），所以雜訊越大，**其他每一個 lag 的值
+    都等比例變小** —— 乘上 ``1 - 雜訊佔的比例``。`half_period_check` 比的是
+    ``ac[2q] - ac[q]`` 這個**差**，差也跟著縮：實測 fin／gate／每隔一根 fin 一個
+    contact 的圖，乾淨時 0.103（剛好過 0.10 的門檻 → 加倍成 40，對），加了雜訊
+    變 0.088（不加倍 → 答 20，錯）。圖一模一樣，只是比較吵。
+
+    算法跟 `golden.measure_agreement` 同一件事：雜訊在**同一塊像素**上估
+    （`golden.noise_variance`，只會少估不會多估），除以那一塊的平均平方。高通
+    （減掉 sigma 的高斯）會把白雜訊的變異數乘上 ``1 - 3/(4πσ²)``（σ=3 時 0.973），
+    一起算進去。
+    """
+    total = float(np.mean(np.asarray(hp, np.float64) ** 2))
+    if not total > 1e-12:
+        return 0.0
+    nv = algo_golden.noise_variance(raw) * (1.0 - 3.0 / (4.0 * np.pi * float(sigma) ** 2))
+    return float(min(1.0, max(0.0, nv / total)))
 
 
 def _local_maxima(v: np.ndarray, lo: int) -> np.ndarray:
@@ -259,8 +301,10 @@ def estimate_period_2d(image: Any, min_period: int = 4,
     if float(g.std()) < 0.5:
         out.warnings.append("the image is flat; nothing repeats")
         return out
-    ac = autocorr2d(g, max_side=max_side)
+    hp, raw, sigma = _hp_window(g, max_side=max_side)
+    ac = _autocorr_of(hp)                  # == autocorr2d(g)，只是順便留下那一塊
     out.ac = ac
+    out.noise_frac = ac_noise_fraction(hp, raw, sigma)
     h, w = ac.shape
     lo = max(2, int(min_period))
     out.px, out.px_sub, out.confidence_x, out.flat_x, ok_x = _axis_period(ac[0, :w // 2], lo)
@@ -278,7 +322,8 @@ def estimate_period_2d(image: Any, min_period: int = 4,
 def half_period_check(image: Any, px: float, py: float, *,
                       ac: Optional[np.ndarray] = None,
                       skip: Tuple[bool, bool] = (False, False),
-                      max_side: int = MAX_SIDE) -> HalfPeriodCheck:
+                      max_side: int = MAX_SIDE,
+                      noise_frac: float = 0.0) -> HalfPeriodCheck:
     """量到的 ``(px, py)`` 是不是真週期的**一半** → 該加倍的軸加倍（F105 報告 5.2）。
 
     沿軸比 ``ac[2q]`` 與 ``ac[q]``：交錯晶格上 q 是子列的間距、不是晶格向量，
@@ -292,7 +337,15 @@ def half_period_check(image: Any, px: float, py: float, *,
 
     ``ac`` 可以把 `estimate_period_2d` 算過的那張傳進來省一次 FFT（1536² 是幾十 ms），
     也免得兩張視窗不一樣。交錯分數在加倍**之後**算、兩軸都有週期才算。
+
+    ``noise_frac``（2026-09-24）：那張面的原點值裡雜訊佔幾成
+    （`Period2D.noise_frac`）。雜訊把每一個 lag 都等比例壓低，所以比之前先除回去
+    —— 否則同一張圖越吵越不會加倍（見 :func:`ac_noise_fraction`）。放大倍數封頂在
+    ``1 / (1 - golden.NOISE_FRACTION_CAP)``。``0``（預設）＝ 以前的行為，一個 byte
+    都不變。交錯分數是比值，雜訊本來就消掉了，不動它。
     """
+    frac = min(max(float(noise_frac or 0.0), 0.0), algo_golden.NOISE_FRACTION_CAP)
+    scale = 1.0 / (1.0 - frac)
     out = HalfPeriodCheck(px=float(px or 0.0), py=float(py or 0.0))
     if ac is None:
         g = _to_gray_f32(image)
@@ -310,7 +363,7 @@ def half_period_check(image: Any, px: float, py: float, *,
         line = lines[i]
         if skip[i] or p < 2.0 or 2.0 * p > line.size - 2:
             continue
-        v1, v2 = _line_at(line, p), _line_at(line, 2.0 * p)
+        v1, v2 = _line_at(line, p) * scale, _line_at(line, 2.0 * p) * scale
         gains[i] = v2 - v1
         if v2 >= PEAK_ABS and v2 - v1 >= HALF_PERIOD_GAIN:
             # 加倍之後把峰對準：2p 附近最近的局部極大做三點拋物線

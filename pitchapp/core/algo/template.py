@@ -301,6 +301,36 @@ class MeasuredPeriod:
     #: 諧波上的其他可能（`estimate_period` 本來就會算）—— 「取錯怎麼辦」的答案。
     candidates: List[Tuple[Optional[int], Optional[int]]] = field(
         default_factory=list)
+    #: ``notes`` 裡**真的讓答案可疑**的那幾句（2026-09-24）—— 畫面上只有這幾句
+    #: 會亮黃燈，其餘是引擎自己做過、而且做對了的修正，收進 Details。
+    #: 怎麼分的見 :data:`_SELF_CORRECTIONS` 與 `measure_period` 裡每一句的註解。
+    doubts: List[str] = field(default_factory=list)
+
+
+#: `period.estimate_period` 的 warnings 裡**不是疑點**的那幾句（2026-09-24）。
+#:
+#: 畫面本來把每一句引擎的話都當成警告，狀態燈因此亮黃 —— 而量過之後，那幾句
+#: 跟「答案錯了」幾乎沒有關係：15 種 layout × 5 種 SEM 條件 × 3 組雜訊（195 張）
+#: 裡，量**對**的 144 張有 89 張亮黃燈，量**錯**的 51 張反而有 21 張打綠勾。
+#: 逐句對過（對的張數／錯的張數）：
+#:
+#: ====================================================  ======  =====
+#: 句子                                                   對      錯
+#: ====================================================  ======  =====
+#: 投影法看到 N、其實每 M 才重複（交錯，用 M）             102     **0**
+#: 半週期檢查之後加倍了                                    7       **0**
+#: no periodic structure detected（某一軸本來就沒有）      4       **0**
+#: 只有二維自相關量到、投影法量不到                         21      15
+#: halved period（投影法自己折半）                         8       10
+#: 諧波鏈不直，只用第一個峰                                 **0**   16
+#: ====================================================  ======  =====
+#:
+#: 前三句是引擎**自己修正、而且修對了**；後三句才是疑點。這裡只列「不是疑點」的
+#: 那幾句 —— **沒列到的一律當疑點**：以後多一句新的話，預設是亮黃燈，不是被
+#: 靜靜地當成沒事。``doubled period (fundamental at 2x)`` 在那 195 張裡沒出現過，
+#: 它跟「半週期檢查之後加倍」是同一種事（往上修正、有 15% 的餘量），所以一起放。
+_SELF_CORRECTIONS = ("doubled period (fundamental at 2x)",
+                     "no periodic structure detected")
 
 
 def period_text(px: float, py: float) -> str:
@@ -358,12 +388,16 @@ def measure_period(gray: np.ndarray,
     """
     g = np.asarray(gray)
     if g.ndim != 2 or g.size == 0 or min(g.shape) < 4:
-        return MeasuredPeriod(notes=["the image is too small to look for a repeat"])
+        small = ["the image is too small to look for a repeat"]
+        return MeasuredPeriod(notes=list(small), doubts=list(small))
     est = algo_period.estimate_period(gray)
     two = algo_period2d.estimate_period_2d(gray)
     notes: List[str] = list(est.warnings or [])
+    # 疑點：見 `_SELF_CORRECTIONS` —— 沒列在那裡的一律算。
+    doubts: List[str] = [w for w in notes if w not in _SELF_CORRECTIONS]
     if two.px is not None or two.py is not None:
         notes.extend(two.warnings or [])       # 鏈不直那一句；「都量不到」由呼叫端講
+        doubts.extend(two.warnings or [])      # 鏈不直：195 張裡 0 對 16 錯
     h, w = gray.shape[:2]
     out: List[Tuple[float, float]] = []
     for axis, span, p1, c1, p2, p2s, c2 in (
@@ -377,9 +411,13 @@ def measure_period(gray: np.ndarray,
         ok2 = p2i >= 2 and c2f >= MIN_PERIOD_CONFIDENCE
         if ok2 and not ok1:
             out.append((p2f, c2f))
-            notes.append("period %s measured by 2-D autocorrelation (%s px); "
-                         "the projection found none - rows are probably "
-                         "staggered" % (axis, algo_period2d.fmt_px(p2f)))
+            said = ("period %s measured by 2-D autocorrelation (%s px); "
+                    "the projection found none - rows are probably "
+                    "staggered" % (axis, algo_period2d.fmt_px(p2f)))
+            notes.append(said)
+            # 疑點：只有一種量法看到，沒有人背書（195 張裡 21 對 15 錯 ——
+            # 條紋的另一軸上，二維會把雜訊的起伏當成一個很小的週期）。
+            doubts.append(said)
         elif ok2 and ok1 and p2i > p1i + 1 and \
                 min(abs(p2i - k * p1i) for k in range(2, 9)) <= 1:
             out.append((p2f, c2f))
@@ -392,7 +430,8 @@ def measure_period(gray: np.ndarray,
         else:
             out.append((float(p1i), c1f))
     (px, cx), (py, cy) = out
-    hp = algo_period2d.half_period_check(gray, px, py, ac=two.ac, skip=given)
+    hp = algo_period2d.half_period_check(gray, px, py, ac=two.ac, skip=given,
+                                         noise_frac=two.noise_frac)
     fx, fy = _snap(hp.px, w), _snap(hp.py, h)
     # 加倍那一句自己寫（不用 `hp.notes`）：數字要是 snap 之後真的用的那個。
     for axis, was, doubled, now in (("across", px, hp.doubled_x, fx),
@@ -403,7 +442,7 @@ def measure_period(gray: np.ndarray,
                          % (axis, algo_period2d.fmt_px(was), algo_period2d.fmt_px(now)))
     return MeasuredPeriod(
         px=fx, py=fy, conf_x=cx, conf_y=cy,
-        notes=notes, stagger=float(hp.stagger),
+        notes=notes, doubts=doubts, stagger=float(hp.stagger),
         doubled=(bool(hp.doubled_x), bool(hp.doubled_y)),
         # 三票各自的答案（見 `MeasuredPeriod` 那幾個欄位的說明）。
         proj_px=(float(est.px) if est.px else None),
