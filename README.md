@@ -56,6 +56,33 @@ QT_QPA_PLATFORM=offscreen python -m pytest -q     # 141 條（Windows 不用設�
 * 不要寫死視窗尺寸，用 `ui/fit_screen.fit()`
 * **同一件事只寫在一個地方** —— 抄出來的第二份一定會漂
 
+## 打包成 exe（給沒有 Python 的電腦）
+
+**Windows 上雙擊 `build_exe.bat`**，等幾分鐘：
+
+```
+dist\PitchHelper\PitchHelper.exe                      ← 雙擊就能用
+dist\PitchHelper-<版本>-<commit>-windows-x64.zip     ← 要帶走就帶這一個
+```
+
+到別台電腦：解開 zip → 雙擊 `PitchHelper\PitchHelper.exe`。那台電腦**不需要
+Python**。⚠ 整個資料夾要一起帶走，只拿 `PitchHelper.exe` 是跑不起來的。
+
+打包這台只需要 Python 3.9 以上（安裝時勾「Add python.exe to PATH」）與網路；
+PyInstaller 與相依套件它會自己裝進 `.venv-build\`，不動你平常的 Python。
+打完會**在打出來的 exe 裡跑一次自我檢查**（`PitchHelper.exe --self-test`），
+沒過就不算成功 —— 打包成功不等於 exe 跑得起來。
+
+```
+build_exe.bat --onefile        單一 exe（每次啟動慢幾秒，也比較容易被防毒擋）
+build_exe.bat --fresh          打包環境砍掉重裝
+build_exe.bat --wheels D:\w    離線：只從這個資料夾裝套件
+```
+
+原理與每個選項的理由在 [`tools/build_exe.py`](tools/build_exe.py) 的檔頭。
+**沒有 Windows 可用**的話：GitHub 上 Actions → `build-exe` → Run workflow，
+跑完在那一次 run 的 Artifacts 下載 —— 雲端跑的就是同一個 `build_exe.bat`。
+
 ## 拿不到 git 的機器（廠內）
 
 廠內那台機器不能跑 git、也不能下載任何東西，但**看得到 GitHub 上的檔案並且

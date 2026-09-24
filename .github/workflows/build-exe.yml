@@ -1,0 +1,58 @@
+name: build-exe
+
+# 一鍵打包的**雲端版**：Actions → build-exe → Run workflow。跑完之後在那一次
+# run 的頁面最下面（Artifacts）下載 `PitchHelper-windows-x64`，解開就是
+# `PitchHelper\PitchHelper.exe` 那一整個資料夾。
+#
+# ⚠ 這裡跑的是**同一個** `build_exe.bat`（人在本機雙擊的那一個），不是另外
+# 寫一份步驟 —— 兩份一定會漂，而漂掉的那一份就是沒有人在本機驗過的那一份。
+# `tests/test_build_exe.py` 會擋。
+on:
+  workflow_dispatch:
+  # 動到打包會用到的檔案，就在 Windows 上真的打一次：打包壞掉的症狀只會出現
+  # 在 Windows 上，`ci.yml`（ubuntu）看不到。清單要跟 `tests/test_build_exe.py`
+  # 對得上。
+  push:
+    paths:
+      - build_exe.bat
+      - tools/build_exe.py
+      - pitchapp/selftest.py
+      - main.py
+      - requirements.txt
+      - .github/workflows/build-exe.yml
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Build (the same build_exe.bat a person double-clicks)
+        shell: cmd
+        env:
+          # runner 的輸出不是主控台，預設編碼是 cp1252 —— 印不出中文。
+          PYTHONIOENCODING: utf-8
+        run: build_exe.bat
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PitchHelper-windows-x64
+          path: dist/PitchHelper/
+          if-no-files-found: error
+
+      # 失敗的時候留下查得到原因的東西：自我檢查的報告、PyInstaller 的
+      # 「少了哪些模組」清單。
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            build/pyinstaller/selftest.txt
+            build/pyinstaller/PitchHelper/warn-PitchHelper.txt
+          if-no-files-found: ignore

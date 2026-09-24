@@ -1,13 +1,15 @@
 # pitch-helper 檔案清單 —— tools/get_code.py 用（每行：git blob SHA-1 + 路徑）。
 # 由 tools/make_filelist.py 產生；tests/test_offline_tools.py 會擋住它腐爛。
+ba7f6c410686ebd08877efccabef6306a4ed90b9 .github/workflows/build-exe.yml
 18be318d4da18fe55e0745149337d589138cb195 .github/workflows/ci.yml
-92bf39010ff94493e48e37f65b7db49c961172fd .gitignore
+e855b5f2c7aff2477bd86fbb0d2f8b3d2cf48ba9 .gitignore
 095a34ce7ca783934d2901bce9ee1154aa3d445f LICENSE
-fa52c759aa1e519be767a40f3fdc9f8c54cdb921 README.md
+a9b4e6e2cc0b89c004888a6b0a9e21e4c2741c3e README.md
+dc2d362ae7c5a7f7d59beaf894c2f7bcd06a41a6 build_exe.bat
 18732146396417dd7a90a7d00c93d9f067d62689 docs/F120-pitch-helper.md
-5620476231b098a5b3e741288e69c217a6eee4ce main.py
+310b6ce7b13e7508f71a1338e078b868d61b2e4b main.py
 e69de29bb2d1d6434b8b29ae775ad8c2e48c5391 pitchapp/__init__.py
-5620476231b098a5b3e741288e69c217a6eee4ce pitchapp/__main__.py
+310b6ce7b13e7508f71a1338e078b868d61b2e4b pitchapp/__main__.py
 e69de29bb2d1d6434b8b29ae775ad8c2e48c5391 pitchapp/core/__init__.py
 e69de29bb2d1d6434b8b29ae775ad8c2e48c5391 pitchapp/core/algo/__init__.py
 d6c3a5eb32faee125931bc684025d20ddf773c71 pitchapp/core/algo/glv.py
@@ -23,6 +25,7 @@ e69de29bb2d1d6434b8b29ae775ad8c2e48c5391 pitchapp/core/ingest/__init__.py
 42948c7ff7901d48434530d524790904d1466be4 pitchapp/core/ingest/imageio.py
 cc25328b06de7db578ab68d5d189ffc9ff439d73 pitchapp/core/log.py
 d1cbfc6b4be93f2b9ba120653b8b50713fe4a39d pitchapp/core/numbers.py
+73e1bdd71c3f45de0d2f0b040463776b6789c83a pitchapp/selftest.py
 e69de29bb2d1d6434b8b29ae775ad8c2e48c5391 pitchapp/ui/__init__.py
 69081c611d94599b822fd245b3a73541d46d9329 pitchapp/ui/assets/d4t-wordmark-dark.svg
 f8cbf586f20a72eb7dbeae1b04aaf0d47f3cbe6a pitchapp/ui/assets/d4t-wordmark.svg
@@ -47,10 +50,12 @@ fe053e9fc8a058fe6e0c689633d636896bca28c5 pitchapp/ui/theme.py
 d828a812c9541a8fbdfb83404af92d8fa08468b2 pyproject.toml
 abb10afc798ba18d68ee0b9bfd58383985b4dfca requirements.txt
 c2818b9203205522771d029f953d9cc74dad7429 tests/test_agreement_noise.py
+9e0c7308059c7be58a5668a6856eeb004c3c42e4 tests/test_build_exe.py
 2934bf2282a0a24a2c9224b05a001c74fa0d166a tests/test_bundle.py
 e20beca813e3950fd7c8cd909582aa62a0d18a89 tests/test_half_period_noise.py
 43275ae0e5eee59d7ebf235561299f120df173b5 tests/test_period_confidence_at.py
 c8ca514e3daeecc1bd4eb0b7edaf169f55f42b43 tests/test_ui_pitch_helper.py
+3faa2d84f229d3ac164378050ce11ee598df5464 tools/build_exe.py
 5a0cd2eb4c3419eedc5d93ebeef0e8e1bea05ae8 tools/check_files.py
 ea204b2e8bc619caaad280efa5e413a05880e3d2 tools/get_code.ps1
 c099ede1bee71d7273881f298b7b9848ff01819d tools/get_code.py

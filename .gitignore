@@ -5,3 +5,6 @@ build/
 dist/
 *.egg-info/
 .venv/
+# tools/build_exe.py：打包專用的 venv，與 `--self-test` 沒給檔名時寫的報告
+.venv-build/
+pitch-helper-selftest.txt
