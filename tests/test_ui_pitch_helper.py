@@ -1915,7 +1915,10 @@ def test_the_right_column_fits_a_768_laptop(win, ph, app):
     win.resize(1180, 780)
     win.show()
     app.processEvents()
-    want = win.split.widget(1).sizeHint().height()
+    # ⚠ 量的是右欄的**內容**（`answer_side`），不是 `split.widget(1)`：後者從
+    # 2026-09-24 起是包著它的捲軸，而捲軸的 sizeHint 是 Qt 的預設值，量不到
+    # 任何東西。捲軸是給 Details 打開時用的 —— 平常仍然要放得下。
+    want = win.answer_side.sizeHint().height()
     assert want <= 700, ("右欄長太高了，768 的筆電上要捲", want)
 
 
@@ -2292,3 +2295,30 @@ def test_the_candidates_fit_the_narrowest_column(win, ph):
     used = sum(b.sizeHint().width() for b in win._try_buttons)
     assert win._try_buttons and used + win.lab_try.sizeHint().width() <= 380, (
         [b.text() for b in win._try_buttons], used)
+
+
+
+def test_open_details_are_reachable_not_cut_off(win, ph, app):
+    """⚠ **實拍過**：780 高的視窗打開 Details，表的後兩列與整段說明都在視窗底邊
+    以下，而畫面上沒有任何東西說它們在那裡。現在右欄會捲，而且打開的那一刻
+    自己捲到它。"""
+    img = _staggered()
+    win.set_image(img, "a.tif")
+    win._on_done(*_run(win, img), "")
+    win.resize(1000, 780)
+    win.show()
+    app.processEvents()
+    win.btn_details.setChecked(True)
+    for _ in range(5):
+        app.processEvents()
+    area = win._side_area
+    view = area.viewport()
+    top = win.details.mapTo(view, win.details.rect().topLeft()).y()
+    bottom = win.details.mapTo(view, win.details.rect().bottomLeft()).y()
+    assert area.verticalScrollBar().maximum() > 0, "放不下的時候要能捲"
+    assert 0 <= top and bottom <= view.height() + 8, (top, bottom, view.height())
+    # 關起來之後不必捲（捲軸自己消失）。
+    win.btn_details.setChecked(False)
+    for _ in range(5):
+        app.processEvents()
+    assert area.verticalScrollBar().maximum() == 0

@@ -239,7 +239,7 @@ def _chain_fit(v: np.ndarray, peaks: np.ndarray, p0: int) -> Tuple[float, bool]:
     return p, True
 
 
-def _axis_period(line: np.ndarray, lo: int
+def _axis_period(line: np.ndarray, lo: int, noise_frac: float = 0.0
                  ) -> Tuple[Optional[int], Optional[float], float, bool, bool]:
     """一條自相關軸線 → ``(週期, 次像素週期, 信心 0–100, 平不平, 鏈直不直)``。
 
@@ -247,12 +247,26 @@ def _axis_period(line: np.ndarray, lo: int
     ``PEAK_REL`` 倍，且 ≥ ``PEAK_ABS``），再沿諧波鏈擬合次像素的週期。
     F104 的 ``v[2p] > 1.15 v[p]`` 加倍規則拿掉了：門檻 0.85 之下它只可能在
     0.85–0.87 這一格觸發，等於死碼。
+
+    ⚠ **「平的」要先扣雜訊再判**（2026-09-24）。直條紋上下平移完全一樣，所以
+    Y 那一條是一片接近 1 的高原 —— 但雜訊把原點以外的每一個 lag 都壓低成
+    ``1 - 雜訊佔的比例``（見 :func:`ac_noise_fraction`）。σ=20 時高原掉到約
+    0.88，``> 0.9`` 的比例歸零，於是「平的」判不出來，接著在高原上的雜訊起伏裡
+    挑了一個「峰」：純直線報出 Y = 4–7 px、信心 88。量過（直線 8／16／40 px、
+    橫線、帶邊緣粗糙度的直線，各 3 組雜訊）：σ 0–10 對、20–40 **全錯**、60 以上
+    又對（雜訊大到信心掉到 40 以下才被丟掉）。
+
+    所以只有這一個判準改看扣過雜訊的值：``noise_frac``（`Period2D.noise_frac`，
+    封頂同 `golden.NOISE_FRACTION_CAP`）。峰、門檻、信心**都不動** —— 它們餵給
+    `measure_period` 的仲裁與畫面上的數字，改它們是另一件事。``0``（預設）＝
+    以前的行為。
     """
     v = np.asarray(line, dtype=np.float64)
     n = v.size
     if n < lo + 3:
         return None, None, 0.0, False, True
-    if float(np.mean(v[lo:] > 0.9)) > FLAT_ABOVE:
+    frac = min(max(float(noise_frac or 0.0), 0.0), algo_golden.NOISE_FRACTION_CAP)
+    if float(np.mean(v[lo:] / (1.0 - frac) > 0.9)) > FLAT_ABOVE:
         return None, None, 0.0, True, True
     idx = _local_maxima(v, lo)
     if idx.size == 0:
@@ -307,8 +321,9 @@ def estimate_period_2d(image: Any, min_period: int = 4,
     out.noise_frac = ac_noise_fraction(hp, raw, sigma)
     h, w = ac.shape
     lo = max(2, int(min_period))
-    out.px, out.px_sub, out.confidence_x, out.flat_x, ok_x = _axis_period(ac[0, :w // 2], lo)
-    out.py, out.py_sub, out.confidence_y, out.flat_y, ok_y = _axis_period(ac[:h // 2, 0], lo)
+    nf = out.noise_frac
+    out.px, out.px_sub, out.confidence_x, out.flat_x, ok_x = _axis_period(ac[0, :w // 2], lo, nf)
+    out.py, out.py_sub, out.confidence_y, out.flat_y, ok_y = _axis_period(ac[:h // 2, 0], lo, nf)
     for axis, ok in (("across", ok_x), ("down", ok_y)):
         if not ok:
             out.warnings.append("the repeats %s do not line up on a straight "

@@ -74,14 +74,14 @@ import os
 from typing import Any, List, Optional, Sequence, Tuple
 
 import numpy as np
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import (
     QColor, QGuiApplication, QImage, QKeySequence, QPainter, QPixmap, QShortcut,
 )
 from PySide6.QtWidgets import (
     QAbstractSpinBox, QApplication, QCheckBox, QDoubleSpinBox, QFileDialog,
-    QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
-    QProgressBar, QPushButton, QVBoxLayout, QWidget,
+    QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
+    QMainWindow, QProgressBar, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from pitchapp.core.algo import period as algo_period
@@ -484,7 +484,25 @@ class PitchHelperWindow(QMainWindow):
         # 地方，不是它的 bug。
         split = HairlineSplitter(Qt.Horizontal, root)
         split.addWidget(self._image_side())
-        split.addWidget(self._answer_side())
+        # ⚠ **右欄包在一個捲軸裡**（2026-09-24）。它平常放得下（768 的筆電上
+        # 約 700 px，`test_the_right_column_fits_a_768_laptop` 守著），但 `▸
+        # Details` 一打開，那張表、那段說明、「What it decided」接在最下面 ——
+        # 780 高的視窗實拍：表的後兩列與整段說明都在視窗底邊以下，而畫面上
+        # 沒有任何東西說它們在那裡。捲軸只在真的放不下時出現；打開 Details
+        # 的那一刻自己捲到它（`_on_details`）。
+        # ⚠ 在**建構時**包，不是事後搬版面（`fit_screen` 的說明：事後搬是
+        # segfault）。最小寬要把捲軸的寬算進去 —— 不然捲軸一出來，380 px
+        # 量出來的那個最小寬就被吃掉一條，膠囊跟 Reset 又擠在一起。
+        self.answer_side = self._answer_side()
+        self._side_area = QScrollArea(root)
+        self._side_area.setWidgetResizable(True)
+        self._side_area.setFrameShape(QFrame.NoFrame)
+        self._side_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._side_area.setWidget(self.answer_side)
+        self._side_area.setMinimumWidth(
+            self.answer_side.minimumWidth()
+            + self._side_area.verticalScrollBar().sizeHint().width())
+        split.addWidget(self._side_area)
         split.setStretchFactor(0, 3)
         split.setStretchFactor(1, 1)
         split.setCollapsible(0, False)     # 圖收掉的話量尺就沒地方拉了
@@ -1624,6 +1642,28 @@ class PitchHelperWindow(QMainWindow):
     def _on_details(self, on: bool) -> None:
         self.btn_details.setText(("▾  Details" if on else "▸  Details"))
         self.details.setVisible(bool(on))
+        if on:
+            # 版面要先長出來才捲得到它 —— 下一輪事件迴圈再捲。
+            QTimer.singleShot(0, self._reveal_details)
+
+    def _reveal_details(self) -> None:
+        """把打開的 Details **整段**捲進畫面（放得下的時候什麼都不做）。
+
+        ⚠ 先讓版面算完：那段字是自動換行的，高度要等寬度定了才知道 ——
+        沒有這一步，捲到的位置是「還沒換行時」的那一個，最後一行落在底邊外。
+        Details 是右欄最底下那一塊，所以放得下的話捲到底就是整段都看得到；
+        比整個視窗還高的話，改成對齊它的頂端。
+        """
+        if not self.details.isVisible():
+            return
+        lay = self.answer_side.layout()
+        if lay is not None:
+            lay.activate()
+        area = self._side_area
+        if self.details.height() + 16 <= area.viewport().height():
+            area.verticalScrollBar().setValue(area.verticalScrollBar().maximum())
+        else:
+            area.ensureWidgetVisible(self.details, 0, 8)
 
     def show_cell_big(self) -> None:
         """疊出來那一格點一下 → 放大看。

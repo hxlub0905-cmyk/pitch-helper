@@ -135,16 +135,63 @@ def test_a_correction_the_engine_got_right_is_not_a_doubt():
     assert m.doubts == [], m.doubts
 
 
-def test_only_one_method_seeing_a_period_is_a_doubt():
-    """直條紋：Y 方向沒有東西重複，二維自相關卻從雜訊的起伏裡挑了一個很小的
-    「週期」—— 只有一種量法看到、沒有人背書，那就是疑點。"""
-    rng = np.random.default_rng(0)
-    xx = np.arange(900)[None, :].repeat(700, 0).astype(np.float64)
-    img = u8(cv2.GaussianBlur((70 + 110 * ((xx % 16) < 8)).astype(np.float64), (0, 0), 1.0)
-             + rng.normal(0, 20, (700, 900)))
-    m = algo_template.measure_period(img)
-    if m.py >= 2:          # 引擎真的報了一個 Y 週期的時候，要被當成疑點
-        assert any("2-D autocorrelation" in d for d in m.doubts), (m.py, m.doubts)
+def test_only_one_method_seeing_a_period_is_a_doubt(monkeypatch):
+    """投影法什麼都沒看到、只有二維自相關看到 —— 沒有人背書，那就是疑點。
+    （逼出這個情況：讓投影法回「沒有」，二維照常量。）"""
+    from types import SimpleNamespace
+    from pitchapp.core.algo import period as algo_period
+    nothing = SimpleNamespace(px=None, py=None, confidence_x=0.0, confidence_y=0.0,
+                              warnings=[], candidates=[])
+    monkeypatch.setattr(algo_period, "estimate_period", lambda *_a, **_k: nothing)
+    m = algo_template.measure_period(regular("tiles", 10))
+    said = [d for d in m.doubts if "2-D autocorrelation" in d]
+    assert len(said) == 2, m.doubts
+
+
+def stripes(sigma, seed=0, vertical=True, p=16, w=900, h=700):
+    rng = np.random.default_rng(seed)
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float64)
+    img = (70 + 110 * (((xx if vertical else yy) % p) < p / 2)).astype(np.float64)
+    return u8(cv2.GaussianBlur(img, (0, 0), 1.0) + rng.normal(0, sigma, (h, w)))
+
+
+@pytest.mark.parametrize("sigma", [20, 30, 40])
+@pytest.mark.parametrize("vertical", [True, False], ids=["vertical", "horizontal"])
+def test_stripes_get_no_fake_period_on_the_empty_axis(vertical, sigma):
+    """⚠ **2026-09-24 修的**：條紋沿著線的方向平移完全一樣，那一軸的自相關是一片
+    接近 1 的高原；雜訊把它壓到 0.9 以下之後，「平的」判不出來，於是從高原上的
+    雜訊起伏裡挑出一個 4–7 px 的假週期（σ 20–40 全錯，更吵反而對）。"""
+    for seed in range(3):
+        m = algo_template.measure_period(stripes(sigma, seed, vertical))
+        along, across = (m.py, m.px) if vertical else (m.px, m.py)
+        assert along < 2, ("假週期", vertical, sigma, seed, m.px, m.py)
+        assert across == 16.0
+
+
+def test_the_stripe_bug_this_fixes_is_real():
+    """修之前的樣子釘住：不扣雜訊的話，同一條高原判不出「平的」。"""
+    img = stripes(20)
+    two = algo_period2d.estimate_period_2d(img)
+    line = two.ac[:two.ac.shape[0] // 2, 0]
+    assert algo_period2d._axis_period(line, 4)[0] is not None, "舊的判法：報出一個週期"
+    got = algo_period2d._axis_period(line, 4, two.noise_frac)
+    assert got[0] is None and got[3], "扣過雜訊：平的"
+
+
+@pytest.mark.parametrize("sigma", [20, 40])
+def test_a_weak_real_period_along_the_lines_is_kept(sigma):
+    """反向：線上每 70 px 真的有一個 via（對比不高）—— 那一軸**不是**平的，
+    扣雜訊不准把它抹成「沒有週期」。"""
+    for seed in range(3):
+        rng = np.random.default_rng(seed)
+        yy, xx = np.mgrid[0:700, 0:900].astype(np.float64)
+        img = 60 + 110 * (((xx % 24) >= 7) & ((xx % 24) < 17))
+        img = img + 60 * (((xx % 24) >= 8) & ((xx % 24) < 16)
+                          & ((yy % 70) >= 31) & ((yy % 70) < 39))
+        img = u8(cv2.GaussianBlur(img.astype(np.float64), (0, 0), 1.0)
+                 + rng.normal(0, sigma, img.shape))
+        m = algo_template.measure_period(img)
+        assert (m.px, m.py) == (24.0, 70.0), (sigma, seed, m.px, m.py)
 
 
 def test_every_doubt_is_also_a_note():
