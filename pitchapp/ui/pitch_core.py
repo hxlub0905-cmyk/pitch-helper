@@ -25,7 +25,7 @@ from typing import Any, List, Optional, Tuple
 
 from pitchapp.core.algo import period2d as algo_period2d
 from pitchapp.core.algo import template as algo_template
-from pitchapp.core.algo.golden import BLURRED_BELOW
+from pitchapp.core.algo.golden import BLURRED_BELOW, NOISE_FRACTION_CAP
 
 __all__ = [
     "AXES", "AXIS_X", "AXIS_Y", "AXIS_BOTH", "AXIS_ICONS", "AXIS_LABELS",
@@ -33,6 +33,7 @@ __all__ = [
     "PITCH_NOT_USED", "WINDOW_TITLE", "PHASE_PENDING",
     "VERDICT_OK", "VERDICT_BLURRED", "VERDICT_NONE", "VERDICT_TYPED",
     "VERDICT_CHECK", "VERDICT_BUSY_PERIOD", "VERDICT_BUSY_STACK",
+    "VERDICT_NOISY", "is_too_noisy",
     "CONF_TYPED", "TONE_GOOD", "TONE_WARN", "TONE_BAD", "CONF_GOOD_FROM",
     "AGREE_GOOD_FROM", "BLURRED_BELOW", "MIN_CELLS_TO_TRUST", "Override",
     "MIN_CELLS_AFTER_TRIM", "MAX_CANDIDATES",
@@ -134,7 +135,17 @@ VERDICT_TYPED = "Using your period"
 #: cell，彼此照樣對得很齊 —— `Cells agree` 會很高。那一刻給一個綠勾等於替一
 #: 個可能錯的答案背書。所以判準是「**沒有任何警告**」而不是「分數夠高」，而
 #: 那個判準直接讀 `_fill_warning` 算出來的那一份，**不另外算第二份**。
+#: ⚠ 2026-09-24：「警告」只算**疑點**（引擎沒把握的那幾句、格數太少、信心太低），
+#: 引擎自己修正而且修對的那幾句不算 —— 本來全算，結果量對的有六成亮這一格，
+#: 燈號跟對錯沒有關係（`template._SELF_CORRECTIONS` 有那張表）。
 VERDICT_CHECK = "Measured — worth a check"
+#: 疊不齊，**但這張圖吵到分數說不準**的時候寫什麼（2026-09-24）。
+#:
+#: `Cells agree` 已經扣掉雜訊了（`golden.measure_agreement`），但扣的倍數有上限
+#: （`golden.NOISE_FRACTION_CAP`）：每一格裡四分之三以上是雜訊的時候，再往上
+#: 放大只是在放大抽樣誤差。那一刻說「Cells do not agree」等於把「量不準」講成
+#: 「量到了，是錯的」—— 所以換這一句，而判斷交給那張疊出來的圖。
+VERDICT_NOISY = "Too noisy to score"
 
 #: 這一軸被使用者的選擇排除掉時寫什麼。**不是空白、不是消失** —— 那一軸的數字
 #: 其實量到了，藏起來的話使用者會以為它量不到，然後回頭去查一個不存在的問題。
@@ -259,7 +270,8 @@ def trust_note(n_along: int) -> str:
 
 def candidate_periods(measured: Any, flags: Tuple[bool, bool],
                       current: Tuple[float, float],
-                      cap: int = MAX_CANDIDATES
+                      cap: int = MAX_CANDIDATES,
+                      limit: Tuple[float, float] = (float("inf"), float("inf"))
                       ) -> List[Tuple[float, float]]:
     """「取錯怎麼辦」的答案：**諧波上的其他可能**，點一下就套用。
 
@@ -270,16 +282,41 @@ def candidate_periods(measured: Any, flags: Tuple[bool, bool],
 
     規則：現在用的那一組不列（它已經在畫面上了）、沒在用的軸不列
     （純 X 的時候提 `60×88` 是沒有意義的）、同一個值只列一次。
+
+    ⚠ **×3 是 2026-09-24 加的，而且排在最前面。** 引擎那份清單只有 ×2 與 ÷2，
+    而「每 3 條線才有一個 via」這種 layout 量到的是 24、真的是 72 —— 畫面上
+    沒有任何一條路點得到它。排序：一軸 ×3 → 一軸 ÷2 → 一軸 ×2 → 兩軸一起的；
+    一軸 ×2 排後面是因為每一軸自己那一列已經有一顆「×2」了。
+    ``limit`` 是每一軸最大的週期（呼叫端給影像的一半：至少要放得下兩格）。
     """
     cur_x, cur_y = float(current[0] or 0.0), float(current[1] or 0.0)
+    mx = float(getattr(measured, "px", 0.0) or 0.0)
+    my = float(getattr(measured, "py", 0.0) or 0.0)
+    pool: List[Tuple[float, float]] = []
+    if mx >= MIN_PERIOD_PX:
+        pool.append((3.0 * mx, my))
+    if my >= MIN_PERIOD_PX:
+        pool.append((mx, 3.0 * my))
+    pool.extend((float(cx or 0.0), float(cy or 0.0))
+                for cx, cy in (getattr(measured, "candidates", None) or []))
+
+    def kind(x: float, y: float) -> int:
+        rx = x / mx if mx >= MIN_PERIOD_PX else 1.0
+        ry = y / my if my >= MIN_PERIOD_PX else 1.0
+        one_axis = [r for r in (rx, ry) if abs(r - 1.0) > 0.05]
+        if len(one_axis) != 1:
+            return 3                           # 兩軸一起（或沒變）
+        r = one_axis[0]
+        return 0 if abs(r - 3.0) < 0.1 else (1 if abs(r - 0.5) < 0.05 else 2)
+
     out: List[Tuple[float, float]] = []
     seen = set()
-    for cx, cy in (getattr(measured, "candidates", None) or []):
-        x = float(cx or 0.0) if flags[0] else cur_x
-        y = float(cy or 0.0) if flags[1] else cur_y
-        if flags[0] and x < MIN_PERIOD_PX:
+    for cx, cy in sorted(pool, key=lambda c: kind(*c)):   # sorted 是穩定的
+        x = cx if flags[0] else cur_x
+        y = cy if flags[1] else cur_y
+        if flags[0] and (x < MIN_PERIOD_PX or x > float(limit[0])):
             continue
-        if flags[1] and y < MIN_PERIOD_PX:
+        if flags[1] and (y < MIN_PERIOD_PX or y > float(limit[1])):
             continue
         if (abs(x - cur_x) < 0.5 and abs(y - cur_y) < 0.5) or (x, y) in seen:
             continue
@@ -480,6 +517,12 @@ def conf_tone(value: float) -> str:
     if v >= algo_template.MIN_PERIOD_CONFIDENCE:
         return TONE_WARN
     return TONE_BAD
+
+def is_too_noisy(gc: Any) -> bool:
+    """這一次疊圖的雜訊校正**封頂了沒有**（見 :data:`VERDICT_NOISY`）。"""
+    frac = float(getattr(gc, "noise_frac", 0.0) or 0.0) if gc is not None else 0.0
+    return frac >= NOISE_FRACTION_CAP
+
 
 def agree_tone(value: float) -> str:
     """一致性 0–1 → 綠／黃／紅（黃紅的界線就是模板那條路的 `BLURRED_BELOW`）。"""

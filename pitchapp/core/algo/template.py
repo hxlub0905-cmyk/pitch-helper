@@ -68,7 +68,7 @@ from . import period2d as algo_period2d
 
 __all__ = [
     "GoldenCell", "MatchResult", "MeasuredPeriod", "measure_period",
-    "build_golden_cell", "anchor_cell",
+    "build_golden_cell", "anchor_cell", "resample_to_pitch",
     "encode_cell", "decode_cell", "tile_cell", "match_patch",
     "patch_structure", "period_text", "MIN_PERIOD_CONFIDENCE", "SNAP_DRIFT_PX",
     "CELL_ENCODING",
@@ -128,7 +128,17 @@ class GoldenCell:
     lap_var: float = 0.0                # 未飽和的原始值（要比較大小時用這個）
     #: 那幾格**彼此**對得多齊，0–1（`golden.stack_agreement`，F40）。
     #: 無量綱、跨影像可比，所以**這一個**才是拿去跟門檻比的那個。
+    #:
+    #: ⚠ **2026-09-24 起是扣掉雜訊之後的**（`golden.measure_agreement`）。
+    #: F40 的數字在週期完全正確時等於「訊號佔每一格變異數的比例」，所以雜訊
+    #: 一大，對的週期也會掉到紅燈（實測 σ=60：0.31）。扣掉之前的那個數字在
+    #: :attr:`agreement_raw`。
     agreement: float = 0.0
+    #: 扣掉雜訊**之前**的一致性（F40 的原始定義）。
+    agreement_raw: float = 0.0
+    #: 每一格的變異數裡估計有幾成是雜訊（0–1）。≥ `golden.NOISE_FRACTION_CAP`
+    #: 時校正已封頂：這張圖太吵，分數只能當參考。
+    noise_frac: float = 0.0
     confidence_x: float = 0.0
     confidence_y: float = 0.0
     anchor: Tuple[int, int] = (0, 0)    # 為了錨定地標捲動了多少
@@ -291,6 +301,36 @@ class MeasuredPeriod:
     #: 諧波上的其他可能（`estimate_period` 本來就會算）—— 「取錯怎麼辦」的答案。
     candidates: List[Tuple[Optional[int], Optional[int]]] = field(
         default_factory=list)
+    #: ``notes`` 裡**真的讓答案可疑**的那幾句（2026-09-24）—— 畫面上只有這幾句
+    #: 會亮黃燈，其餘是引擎自己做過、而且做對了的修正，收進 Details。
+    #: 怎麼分的見 :data:`_SELF_CORRECTIONS` 與 `measure_period` 裡每一句的註解。
+    doubts: List[str] = field(default_factory=list)
+
+
+#: `period.estimate_period` 的 warnings 裡**不是疑點**的那幾句（2026-09-24）。
+#:
+#: 畫面本來把每一句引擎的話都當成警告，狀態燈因此亮黃 —— 而量過之後，那幾句
+#: 跟「答案錯了」幾乎沒有關係：15 種 layout × 5 種 SEM 條件 × 3 組雜訊（195 張）
+#: 裡，量**對**的 144 張有 89 張亮黃燈，量**錯**的 51 張反而有 21 張打綠勾。
+#: 逐句對過（對的張數／錯的張數）：
+#:
+#: ====================================================  ======  =====
+#: 句子                                                   對      錯
+#: ====================================================  ======  =====
+#: 投影法看到 N、其實每 M 才重複（交錯，用 M）             102     **0**
+#: 半週期檢查之後加倍了                                    7       **0**
+#: no periodic structure detected（某一軸本來就沒有）      4       **0**
+#: 只有二維自相關量到、投影法量不到                         21      15
+#: halved period（投影法自己折半）                         8       10
+#: 諧波鏈不直，只用第一個峰                                 **0**   16
+#: ====================================================  ======  =====
+#:
+#: 前三句是引擎**自己修正、而且修對了**；後三句才是疑點。這裡只列「不是疑點」的
+#: 那幾句 —— **沒列到的一律當疑點**：以後多一句新的話，預設是亮黃燈，不是被
+#: 靜靜地當成沒事。``doubled period (fundamental at 2x)`` 在那 195 張裡沒出現過，
+#: 它跟「半週期檢查之後加倍」是同一種事（往上修正、有 15% 的餘量），所以一起放。
+_SELF_CORRECTIONS = ("doubled period (fundamental at 2x)",
+                     "no periodic structure detected")
 
 
 def period_text(px: float, py: float) -> str:
@@ -348,12 +388,16 @@ def measure_period(gray: np.ndarray,
     """
     g = np.asarray(gray)
     if g.ndim != 2 or g.size == 0 or min(g.shape) < 4:
-        return MeasuredPeriod(notes=["the image is too small to look for a repeat"])
+        small = ["the image is too small to look for a repeat"]
+        return MeasuredPeriod(notes=list(small), doubts=list(small))
     est = algo_period.estimate_period(gray)
     two = algo_period2d.estimate_period_2d(gray)
     notes: List[str] = list(est.warnings or [])
+    # 疑點：見 `_SELF_CORRECTIONS` —— 沒列在那裡的一律算。
+    doubts: List[str] = [w for w in notes if w not in _SELF_CORRECTIONS]
     if two.px is not None or two.py is not None:
         notes.extend(two.warnings or [])       # 鏈不直那一句；「都量不到」由呼叫端講
+        doubts.extend(two.warnings or [])      # 鏈不直：195 張裡 0 對 16 錯
     h, w = gray.shape[:2]
     out: List[Tuple[float, float]] = []
     for axis, span, p1, c1, p2, p2s, c2 in (
@@ -367,9 +411,13 @@ def measure_period(gray: np.ndarray,
         ok2 = p2i >= 2 and c2f >= MIN_PERIOD_CONFIDENCE
         if ok2 and not ok1:
             out.append((p2f, c2f))
-            notes.append("period %s measured by 2-D autocorrelation (%s px); "
-                         "the projection found none - rows are probably "
-                         "staggered" % (axis, algo_period2d.fmt_px(p2f)))
+            said = ("period %s measured by 2-D autocorrelation (%s px); "
+                    "the projection found none - rows are probably "
+                    "staggered" % (axis, algo_period2d.fmt_px(p2f)))
+            notes.append(said)
+            # 疑點：只有一種量法看到，沒有人背書（195 張裡 21 對 15 錯 ——
+            # 條紋的另一軸上，二維會把雜訊的起伏當成一個很小的週期）。
+            doubts.append(said)
         elif ok2 and ok1 and p2i > p1i + 1 and \
                 min(abs(p2i - k * p1i) for k in range(2, 9)) <= 1:
             out.append((p2f, c2f))
@@ -382,7 +430,8 @@ def measure_period(gray: np.ndarray,
         else:
             out.append((float(p1i), c1f))
     (px, cx), (py, cy) = out
-    hp = algo_period2d.half_period_check(gray, px, py, ac=two.ac, skip=given)
+    hp = algo_period2d.half_period_check(gray, px, py, ac=two.ac, skip=given,
+                                         noise_frac=two.noise_frac)
     fx, fy = _snap(hp.px, w), _snap(hp.py, h)
     # 加倍那一句自己寫（不用 `hp.notes`）：數字要是 snap 之後真的用的那個。
     for axis, was, doubled, now in (("across", px, hp.doubled_x, fx),
@@ -393,7 +442,7 @@ def measure_period(gray: np.ndarray,
                          % (axis, algo_period2d.fmt_px(was), algo_period2d.fmt_px(now)))
     return MeasuredPeriod(
         px=fx, py=fy, conf_x=cx, conf_y=cy,
-        notes=notes, stagger=float(hp.stagger),
+        notes=notes, doubts=doubts, stagger=float(hp.stagger),
         doubled=(bool(hp.doubled_x), bool(hp.doubled_y)),
         # 三票各自的答案（見 `MeasuredPeriod` 那幾個欄位的說明）。
         proj_px=(float(est.px) if est.px else None),
@@ -409,6 +458,26 @@ def measure_period(gray: np.ndarray,
         half_gain_x=float(hp.gain_x or 0.0),
         half_gain_y=float(hp.gain_y or 0.0),
         candidates=list(est.candidates or []))
+
+
+def resample_to_pitch(gray: np.ndarray, px: float, py: float) -> np.ndarray:
+    """小數週期 → 把影像重採樣成**整數** pitch（``round(px)`` × ``round(py)``）。
+
+    整數週期時**原樣回傳同一個物件**（一個 byte 都不動）。做法與理由見
+    :func:`build_golden_cell` 的「小數週期」那一段。
+
+    ⚠ 這一行本來只住在 `build_golden_cell` 裡。2026-09-24 抽出來，因為
+    `ui/pitch_helper` 去邊界那一步（`_PitchWorker._without_edges`）要疊**同一種**
+    重採樣過的像素 —— 它本來直接拿原圖用 ``round(79.5) = 80`` 去疊，每格漂
+    0.5 px，一張乾淨的圖一致性從 0.97 掉到 0.87、疊出來那一格也是糊的。
+    """
+    px, py = float(px), float(py)
+    if px.is_integer() and py.is_integer():
+        return gray
+    h, w = gray.shape[:2]
+    sx, sy = int(round(px)) / px, int(round(py)) / py
+    return cv2.resize(gray, (int(round(w * sx)), int(round(h * sy))),
+                      interpolation=cv2.INTER_LINEAR)
 
 
 def build_golden_cell(image: Any, px: Optional[float] = None,
@@ -507,10 +576,7 @@ def build_golden_cell(image: Any, px: Optional[float] = None,
     ix, iy = int(round(px)), int(round(py))
     sx, sy = ix / px, iy / py
     fractional = not (px.is_integer() and py.is_integer())
-    work = gray
-    if fractional:
-        work = cv2.resize(gray, (int(round(w * sx)), int(round(h * sy))),
-                          interpolation=cv2.INTER_LINEAR)
+    work = resample_to_pitch(gray, px, py)
 
     # **相位搜尋是這一支的全部成本**（281 個候選 × 整張圖）—— 進度就報它。
     stop = [False]
@@ -544,7 +610,12 @@ def build_golden_cell(image: Any, px: Optional[float] = None,
     # 對得齊嗎」，而疊完之後那幾格已經不在了。用 `choose_origin` 挑的那個
     # origin —— 也就是真正被疊起來的那一組格子；`anchor_cell` 之後的捲動是
     # 整張一起移，不影響格子之間的一致性。
-    agreement = algo_golden.stack_agreement(work, ix, iy, origin=origin)
+    # ⚠ **雜訊要在疊的那一張上估**（2026-09-24）：小數週期時疊的是重採樣過
+    # 的 `work`，而雙線性內插會改變雜訊的大小與顏色 —— 在原圖上估就是拿另一
+    # 批像素的雜訊去校正這一批。
+    agree = algo_golden.measure_agreement(
+        work, ix, iy, origin=origin,
+        noise_var=algo_golden.noise_variance(work))
     # 錨定把 cell 往左（上）捲了 roll，等於格線原點往右（下）移 roll。
     eff_i = ((int(origin[0]) + int(roll[0])) % max(1, ix),
              (int(origin[1]) + int(roll[1])) % max(1, iy))
@@ -555,7 +626,9 @@ def build_golden_cell(image: Any, px: Optional[float] = None,
         # −0.003，再 mod 週期就繞成 79.499 —— 整整少畫一列格子）。
         eff = ((eff_i[0] / sx) % px, (eff_i[1] / sy) % py)
     return GoldenCell(cell=cell, px=ix, py=iy, ghosting=float(score),
-                      lap_var=float(lap_var), agreement=float(agreement),
+                      lap_var=float(lap_var), agreement=float(agree.value),
+                      agreement_raw=float(agree.raw),
+                      noise_frac=float(agree.noise_frac),
                       confidence_x=conf_x,
                       confidence_y=conf_y, anchor=roll, n_cells=int(n_cells),
                       periodic_x=periodic_x, periodic_y=periodic_y,

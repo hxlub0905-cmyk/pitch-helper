@@ -412,15 +412,44 @@ def test_typing_a_period_redraws_the_grid_at_once(win, ph):
     assert win.view.overlay_count() < before
 
 
-def test_the_double_button_doubles_both_axes(win, ph):
-    """使用者的真實情境：「兩根 MG 才構成他要比的那個單元」。"""
+def test_each_axis_doubles_on_its_own(win, ph):
+    """使用者的真實情境：「兩根 MG 才構成他要比的那個單元」—— 那是**一軸**的事。
+
+    ⚠ 2026-09-24 以前這一顆兩軸一起加倍（這條測試本來斷言 120 × 88）。最常見的
+    取錯是只有一軸差一倍：每隔一根 fin 才有一個 contact，量到 20 × 45、真的是
+    40 × 45 —— 兩軸一起加倍給 40 × 90，永遠到不了。使用者 2026-09-24：
+    「×2 可以只加倍 X 或只加倍 Y」。
+    """
     from pitchapp.core.algo import template as algo_template
 
     img = tiles(px=60, py=44)
     win.set_image(img, "synthetic.tif")
     win._on_done(algo_template.measure_period(img), None, "")
-    win._on_double()
-    assert [r[1] for r in win.rows()] == ["120", "88"]
+    # 畫面上那一顆，不是只有方法。⚠ 先按：按下去會開始重疊，而重疊的時候
+    # 它跟其他控制項一樣是灰的（按不出結果的東西要看起來按不出結果）。
+    win._double_buttons[1].click()
+    assert [r[1] for r in win.rows()] == ["60", "88"]
+    win._on_double(0)
+    assert [r[1] for r in win.rows()] == ["120", "88"], "另一軸打過的值要留著"
+    win._on_reset()
+    win._on_double(0)
+    assert [r[1] for r in win.rows()] == ["120", "44"]
+
+
+def test_the_double_buttons_live_on_their_axis_rows(win, ph):
+    """一軸一顆，住在那一軸自己那一列 —— X only 的時候 Y 那一顆跟著整列不見；
+    還沒量到數字的時候按不出結果，所以是灰的。"""
+    from pitchapp.core.algo import template as algo_template
+
+    img = tiles(px=60, py=44)
+    win.set_image(img, "synthetic.tif")
+    assert not any(b.isEnabled() for b in win._double_buttons), "還沒有數字可以翻倍"
+    win._on_done(algo_template.measure_period(img), None, "")
+    assert all(b.isEnabled() for b in win._double_buttons)
+    win.chips_axis.set_text(ph.AXIS_X)
+    win._on_axis(ph.AXIS_X)
+    assert win._double_buttons[0].isVisibleTo(win)
+    assert not win._double_buttons[1].isVisibleTo(win), "Y 沒在用，Y 的 ×2 也不見"
 
 
 def test_reset_puts_the_measured_period_back(win, ph):
@@ -429,7 +458,8 @@ def test_reset_puts_the_measured_period_back(win, ph):
     img = tiles(px=60, py=44)
     win.set_image(img, "synthetic.tif")
     win._on_done(algo_template.measure_period(img), None, "")
-    win._on_double()
+    win._on_double(0)
+    win._on_double(1)
     win._on_reset()
     assert [r[1] for r in win.rows()] == ["60", "44"]
     assert win.override() == (None, None)
@@ -875,7 +905,11 @@ def test_leaving_the_edge_cells_out_rescues_a_scan_edge(ph):
     assert box is not None
     x0, y0, x1, y1 = box
     inner = img[y0:y1, x0:x1]
-    better = algo_golden.stack_agreement(inner, int(gc.period_x), int(gc.period_y))
+    # ⚠ **跟 worker 算同一個數字**（2026-09-24 起 `gc.agreement` 扣掉了雜訊）：
+    # 拿扣過雜訊的整張去比沒扣的內圈，是兩把尺在比。
+    better = algo_golden.stack_agreement(
+        inner, int(gc.period_x), int(gc.period_y),
+        noise_var=algo_golden.noise_variance(inner))
     assert better > gc.agreement + 0.05, (gc.agreement, better)
     assert ph.agree_tone(better) == ph.TONE_GOOD
 
@@ -890,7 +924,9 @@ def test_leaving_the_edge_out_costs_nothing_on_a_clean_image(ph):
     box = ph.trim_to_inner(img.shape[:2], gc.period_x, gc.period_y,
                            gc.origin, (True, True))
     inner = img[box[1]:box[3], box[0]:box[2]]
-    after = algo_golden.stack_agreement(inner, int(gc.period_x), int(gc.period_y))
+    after = algo_golden.stack_agreement(          # 同上：跟 worker 同一把尺
+        inner, int(gc.period_x), int(gc.period_y),
+        noise_var=algo_golden.noise_variance(inner))
     assert after >= gc.agreement - 0.01, (gc.agreement, after)
 
 
@@ -1879,7 +1915,10 @@ def test_the_right_column_fits_a_768_laptop(win, ph, app):
     win.resize(1180, 780)
     win.show()
     app.processEvents()
-    want = win.split.widget(1).sizeHint().height()
+    # ⚠ 量的是右欄的**內容**（`answer_side`），不是 `split.widget(1)`：後者從
+    # 2026-09-24 起是包著它的捲軸，而捲軸的 sizeHint 是 Qt 的預設值，量不到
+    # 任何東西。捲軸是給 Details 打開時用的 —— 平常仍然要放得下。
+    want = win.answer_side.sizeHint().height()
     assert want <= 700, ("右欄長太高了，768 的筆電上要捲", want)
 
 
@@ -1957,11 +1996,329 @@ def test_the_state_line_never_uses_colour_alone(win, ph):
     """F117 U13：顏色是第二個通道，不是唯一的。每一種狀態都有自己的字。"""
     words = {ph.VERDICT_OK, ph.VERDICT_BLURRED, ph.VERDICT_NONE,
              ph.VERDICT_TYPED, ph.VERDICT_CHECK, ph.VERDICT_BUSY_PERIOD,
-             ph.VERDICT_BUSY_STACK}
-    assert len(words) == 7, "兩種狀態共用同一句話"
+             ph.VERDICT_BUSY_STACK, ph.VERDICT_NOISY}
+    assert len(words) == 8, "兩種狀態共用同一句話"
     # 而且短到跟名字排得下（411 px 扣掉圖示與名字剩約 290）。
     from PySide6.QtGui import QFontMetrics
     win.lab_state.ensurePolished()
     fm = QFontMetrics(win.lab_state.font())
     for w in words:
         assert fm.horizontalAdvance(w) <= 220, (w, fm.horizontalAdvance(w))
+
+
+# --------------------------------------------------------------------------- #
+# 13. 跑的途中換圖／改設定（2026-09-24 修的競態）
+# --------------------------------------------------------------------------- #
+def _settle(app, win, timeout=90.0):
+    """等 worker 跑完（含排隊補跑的那一次）。真的開執行緒。"""
+    import time
+    end = time.time() + timeout
+    while time.time() < end:
+        app.processEvents()
+        if win._worker is None and win._pending is None:
+            app.processEvents()
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def test_a_new_image_during_a_run_gets_its_own_answer(app, win, ph):
+    """⚠ **實拍過的 bug**：量一張大圖的途中拖進（或 Ctrl+V）另一張 —— 拖放與
+    快捷鍵不看按鈕灰不灰。本來 `remeasure` 看到有 worker 就 return，新圖
+    **沒有被量**，舊圖的答案回來之後落在新圖上：條紋圖上寫「60 × 44 px ✓」。
+
+    ⚠ 中間**不處理任何事件**，所以「第二張進來時第一張還在跑」是確定的，
+    不靠時間賽跑。
+    """
+    win.set_image(tiles(px=60, py=44, w=1536, h=1536), "A.tif")
+    win.remeasure()
+    assert win._worker is not None
+    win.set_image(tiles(px=48, py=36, w=600, h=480), "B.tif")
+    win.remeasure()
+    assert _settle(app, win), "排隊的那一次要自己跑完"
+    assert [r[1] for r in win.rows()] == ["48", "36"], win.rows()
+    assert win._gc is not None and win._gc.cell.shape == (36, 48)
+    assert win.verdict()[1] != ph.VERDICT_BUSY_PERIOD
+
+
+def test_loading_a_new_image_clears_the_old_answer_at_once(win, ph):
+    """新圖進來的那一刻右欄就要空掉 —— 不是等新答案回來（4096² 約 10 秒）。
+    本來那幾秒寫的是上一張圖的 pitch 與綠勾，格線也還是上一張的。"""
+    img = tiles(px=60, py=44)
+    win.set_image(img, "A.tif")
+    win._on_done(*_run(win, img), "")
+    assert win.lab_big.text() != ph.PITCH_UNSET and win.view.overlay_count() > 0
+    win.set_image(tiles(px=48, py=36), "B.tif")
+    assert win.lab_big.text() == ph.PITCH_UNSET
+    assert win.view.overlay_count() == 0
+    assert win.lab_stack.text() == ""
+    assert win.verdict()[0] != ph.TONE_GOOD
+
+
+def test_a_setting_changed_mid_run_is_not_dropped(app, win, ph):
+    """答案先到、疊圖還在跑的那幾秒，控制項是開著的 —— 在那時候按 `Y only`，
+    本來那一次要求就安靜地消失了，最後畫面上的疊圖是**舊設定**的。"""
+    img = tiles(px=60, py=44, w=1200, h=960)
+    win.set_image(img, "a.tif")
+    win._on_done(*_run(win, img), "")
+    win.remeasure(reuse=True)                    # 用 X + Y 疊（背景跑）
+    assert win._worker is not None
+    win.chips_axis.set_text(ph.AXIS_Y)
+    win._on_axis(ph.AXIS_Y)                      # 跑的途中改成 Y only
+    assert _settle(app, win)
+    assert win._flags() == (False, True)
+    h, w = img.shape
+    assert win._gc.cell.shape[1] == w, (
+        "Y only 的一格是整張寬 —— 疊出來的還是 X + Y 那一份", win._gc.cell.shape)
+
+
+def test_a_stale_result_is_ignored_but_a_direct_one_is_not(win, ph):
+    """過期的 worker 送來的東西不收；測試（或任何非 worker）直接呼叫照收。"""
+    img = tiles(px=60, py=44)
+    win.set_image(img, "a.tif")
+    m, gc = _run(win, img)
+    win._m = win._gc = None
+    old = ph._PitchWorker(img, ph.AXIS_BOTH)
+    old.req, old.img_gen = win._req - 1, win._img_gen - 1
+    old.done.connect(win._on_done)
+    old.answer.connect(win._on_answer)
+    old.answer.emit(m)
+    old.done.emit(m, gc, "")
+    assert win._m is None and win._gc is None, "過期的那一份上了畫面"
+    win._on_done(m, gc, "")
+    assert win._gc is gc
+
+
+def test_the_typed_confidence_is_worked_out_once(win, ph, monkeypatch):
+    """⚠ 它跑在 UI 執行緒上，而一次重畫本來問它五次（十次投影＋自相關）——
+    4096² 上打一個週期，每次重畫 297 ms。"""
+    from pitchapp.core.algo import period as algo_period
+    img = tiles(px=60, py=44)
+    win.set_image(img, "a.tif")
+    win._on_done(*_run(win, img), "")
+    calls = []
+    real = algo_period.confidence_at
+    monkeypatch.setattr(algo_period, "confidence_at",
+                        lambda *a, **k: calls.append(a[1:]) or real(*a, **k))
+    for sp, v in ((win.spin_px, 61.0), (win.spin_py, 45.0)):
+        sp.blockSignals(True)
+        sp.setValue(v)
+        sp.blockSignals(False)
+    win._refresh()
+    win._refresh()
+    assert len(calls) == 2, calls                # X 一次、Y 一次，第二次重畫 0
+    first = win.typed_conf()
+    win.set_image(tiles(px=48, py=36), "b.tif")  # 像素換了，要重算
+    assert win.typed_conf() != first
+    assert len(calls) == 4
+
+
+# --------------------------------------------------------------------------- #
+# 14. `Cells agree` 扣掉雜訊之後，畫面上怎麼講（2026-09-24）
+# --------------------------------------------------------------------------- #
+def _blobs(sigma, seed=0, contrast=1.0, w=900, h=700):
+    import cv2
+    rng = np.random.default_rng(seed)
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float64)
+    fx, fy = (xx % 60) / 60, (yy % 44) / 44
+    img = (70 + 110 * ((fx > .2) & (fx < .55) & (fy > .25) & (fy < .7))
+           + 40 * ((fx > .7) & (fx < .8))).astype(np.float64)
+    img = 100 + contrast * (cv2.GaussianBlur(img, (0, 0), 1.2) - 70)
+    return np.clip(np.round(img + rng.normal(0, sigma, img.shape)), 0, 255).astype(np.uint8)
+
+
+def test_a_noisy_but_right_period_is_not_called_wrong(win, ph):
+    """⚠ **這是那個 bug 的樣子**：σ=60、週期完全正確，本來 `Cells agree 0.39`
+    紅、狀態行「Cells do not agree」、底下寫「this period is wrong」。"""
+    img = _blobs(60, seed=3)
+    win.set_image(img, "noisy.tif")
+    win._on_done(*_run(win, img), "")
+    assert [r[1] for r in win.rows()] == ["60", "44"]
+    assert win._gc.agreement_raw < 0.5, "修之前的那個數字（釘住 bug 是真的）"
+    assert win.bar_agree.tone() == ph.TONE_GOOD, win._gc.agreement
+    assert win.verdict()[1] not in (ph.VERDICT_BLURRED, ph.VERDICT_NOISY)
+    assert "wrong" not in win.lab_stack.text()
+    assert "noise" in win.details.text(), "扣了多少雜訊要查得到"
+
+
+def test_a_wrong_period_on_a_noisy_image_is_still_red(win, ph):
+    """反向：扣掉雜訊不准把錯的週期救回來。"""
+    img = _blobs(40, seed=4)
+    win.set_image(img, "noisy.tif")
+    win.spin_px.setValue(65.0)
+    win._on_done(*_run(win, img), "")
+    assert win.bar_agree.tone() == ph.TONE_BAD, win._gc.agreement
+    assert win.verdict()[1] == ph.VERDICT_BLURRED
+    assert "rotated" in win.lab_stack.text(), win.lab_stack.text()
+
+
+def test_the_try_x2_advice_is_gone(win, ph):
+    """×2 疊出來的分數跟原本一模一樣 —— 那句建議從來救不了任何一張圖。"""
+    img = tiles(px=60, py=44, w=900, h=700)
+    win.set_image(img, "a.tif")
+    win.spin_px.setValue(62.0)                   # 差 2 px、15 格：黃燈
+    win._on_done(*_run(win, img), "")
+    assert win.bar_agree.tone() == ph.TONE_WARN, win._gc.agreement
+    assert "×2" not in win.lab_stack.text()
+    assert "Check the picture" in win.lab_stack.text()
+
+
+def test_too_noisy_to_score_says_so_instead_of_wrong(win, ph):
+    """吵到扣雜訊的倍數封頂：低分可能只是量不準，不准講成「錯」。"""
+    img = _blobs(40, seed=5, contrast=0.25)
+    win.set_image(img, "faint.tif")
+    win._on_done(*_run(win, img), "")
+    assert ph.is_too_noisy(win._gc), win._gc.noise_frac
+    if win.bar_agree.tone() != ph.TONE_GOOD:
+        assert win.verdict() == (ph.TONE_WARN, ph.VERDICT_NOISY)
+        assert "very noisy" in win.lab_stack.text()
+
+
+def test_a_fractional_period_keeps_its_cell_sharp_when_edges_are_skipped(ph):
+    """⚠ **2026-09-24 修的**：去邊界那一步本來拿原圖用 ``round(79.5)=80`` 去疊，
+    每格漂 0.5 px —— 乾淨的圖一致性 0.97 → 0.87，疊出來那一格是糊的。
+    `Skip edge cells` 預設開著，所以每一個小數週期都踩得到。"""
+    from pitchapp.core.algo import template as algo_template
+    img = _blobs(8, seed=6, w=1600, h=800)
+    # 把圖樣換成 79.5 × 50（`_blobs` 是 60 × 44）
+    import cv2
+    yy, xx = np.mgrid[0:800, 0:1600].astype(np.float64)
+    fx, fy = (xx % 79.5) / 79.5, (yy % 50) / 50
+    img = (70 + 110 * ((fx > .2) & (fx < .55) & (fy > .25) & (fy < .7))
+           + 40 * ((fx > .7) & (fx < .8))).astype(np.float64)
+    img = np.clip(np.round(cv2.GaussianBlur(img, (0, 0), 1.2)
+                           + np.random.default_rng(6).normal(0, 8, img.shape)),
+                  0, 255).astype(np.uint8)
+    m = algo_template.measure_period(img)
+    assert abs(m.px - 79.5) < 0.05
+    whole = algo_template.build_golden_cell(img, px=m.px, py=m.py)
+    before = (whole.agreement, whole.cell.astype(float).ravel().copy())
+    w = ph._PitchWorker(img, ph.AXIS_BOTH)
+    gc = w._without_edges(whole, m.px, m.py, (True, True))
+    assert gc.trimmed
+    assert gc.agreement >= before[0] - 0.01, (before[0], gc.agreement)
+    corr = np.corrcoef(before[1], gc.cell.astype(float).ravel())[0, 1]
+    assert corr > 0.99, "剪完之後疊出來的要是同一格（同一個相位）"
+
+
+# --------------------------------------------------------------------------- #
+# 15. 狀態燈只為疑點亮黃、候選有 ×3（2026-09-24，複雜 pattern 驗算之後）
+# --------------------------------------------------------------------------- #
+def _staggered(w=900, h=700, seed=0):
+    """每一列錯半格：真的單元 40 × 70，引擎要自己換量法才答得出來。"""
+    import cv2
+    rng = np.random.default_rng(seed)
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float64)
+    xs = xx + 20 * (np.floor(yy / 35) % 2)
+    img = (70 + 120 * ((((xs % 40) - 20) ** 2 + ((yy % 35) - 17) ** 2) < 64)).astype(np.float64)
+    return np.clip(np.round(cv2.GaussianBlur(img, (0, 0), 1.0)
+                            + rng.normal(0, 10, (h, w))), 0, 255).astype(np.uint8)
+
+
+def test_a_correction_the_engine_got_right_does_not_turn_the_light_yellow(win, ph):
+    """⚠ **這是那個燈號改動的樣子。** 本來引擎說了任何一句話就亮黃燈 —— 量過 195 張
+    複雜 pattern：量對的有六成亮黃，量錯的反而四成打綠勾。交錯的圖上引擎換了量法、
+    加了倍，那是它**修對了**：綠燈，而它說的話收進 Details。"""
+    img = _staggered()
+    win.set_image(img, "staggered.tif")
+    win._on_done(*_run(win, img), "")
+    assert [r[1] for r in win.rows()] == ["40", "70"]
+    assert win._m.notes and not win._m.doubts
+    assert win.verdict() == (ph.TONE_GOOD, ph.VERDICT_OK), win.warn.text()
+    assert "What it decided" in win.details.text()
+
+
+def test_a_real_doubt_still_turns_it_yellow(win, ph):
+    """反向：引擎自己沒把握的那幾句（只有一種量法看到、諧波鏈不直…）照樣亮黃。"""
+    img = tiles(px=60, py=44)
+    win.set_image(img, "a.tif")
+    m, gc = _run(win, img)
+    m.doubts = ["the repeats down do not line up on a straight harmonic chain; "
+                "the period was taken from the first peak alone"]
+    m.notes = list(m.notes) + m.doubts
+    win._on_done(m, gc, "")
+    assert win.verdict() == (ph.TONE_WARN, ph.VERDICT_CHECK)
+    assert "harmonic chain" in win.warn.text()
+
+
+def test_an_answer_without_the_doubts_field_keeps_the_old_rule(win, ph):
+    """舊的（或假的）答案沒有 `doubts`：每一句都當疑點 —— 寧可多亮一次黃燈。"""
+    img = tiles(px=60, py=44)
+    win.set_image(img, "a.tif")
+    m, gc = _run(win, img)
+    fake = _M()
+    fake.notes = ["something the engine said"]
+    assert not hasattr(fake, "doubts")
+    win._m = fake
+    assert win._doubts() == ["something the engine said"]
+
+
+def test_or_try_offers_three_times(win, ph):
+    """每 3 條線才有一個 via：量到 24、真的是 72 —— 候選裡本來只有 ×2 與 ÷2。"""
+    import cv2
+    rng = np.random.default_rng(0)
+    yy, xx = np.mgrid[0:600, 0:900].astype(np.float64)
+    k = np.floor(xx / 24)
+    img = 60 + 110 * (((xx % 24) >= 7) & ((xx % 24) < 17))
+    img = img + 25 * ((k % 3 == 0) & ((xx % 24) >= 8) & ((xx % 24) < 16)
+                      & ((yy % 70) >= 31) & ((yy % 70) < 39))
+    img = np.clip(np.round(cv2.GaussianBlur(img.astype(np.float64), (0, 0), 1.0)
+                           + rng.normal(0, 8, img.shape)), 0, 255).astype(np.uint8)
+    win.set_image(img, "vias.tif")
+    win._on_done(*_run(win, img), "")
+    labels = [b.text() for b in win._try_buttons]
+    if win.rows()[0][1] == "24":                 # 引擎量到的是線距（那個 bug 本身）
+        assert labels and labels[0].startswith("72"), labels
+
+
+def test_a_candidate_leaves_the_axis_it_does_not_change_alone(win, ph):
+    """⚠ 週期欄只收一位小數：候選 ``90 × 51.96`` 只改 X，把 51.96 原樣寫進 Y
+    那一格會變成 52.0，畫面接著說「Y: yours 52 vs measured 51.96」。"""
+    img = tiles(px=60, py=44)
+    win.set_image(img, "a.tif")
+    m, gc = _run(win, img)
+    m.px, m.py = 30.0, 51.96
+    win._m = m
+    win._apply_candidate(90.0, 51.96)
+    assert win.override() == (90.0, None), win.override()
+
+
+def test_the_candidates_fit_the_narrowest_column(win, ph):
+    """×3 之後小數週期的標籤會變長（`30 × 155.88`）—— 放不下的那一顆不放，
+    不是被切掉一截。"""
+    img = tiles(px=60, py=44)
+    win.set_image(img, "a.tif")
+    m, gc = _run(win, img)
+    m.px, m.py = 30.0, 51.96
+    m.candidates = [(30, 51), (15, 51), (60, 51), (30, 25), (30, 103)]
+    win._on_done(m, gc, "")
+    used = sum(b.sizeHint().width() for b in win._try_buttons)
+    assert win._try_buttons and used + win.lab_try.sizeHint().width() <= 380, (
+        [b.text() for b in win._try_buttons], used)
+
+
+
+def test_open_details_are_reachable_not_cut_off(win, ph, app):
+    """⚠ **實拍過**：780 高的視窗打開 Details，表的後兩列與整段說明都在視窗底邊
+    以下，而畫面上沒有任何東西說它們在那裡。現在右欄會捲，而且打開的那一刻
+    自己捲到它。"""
+    img = _staggered()
+    win.set_image(img, "a.tif")
+    win._on_done(*_run(win, img), "")
+    win.resize(1000, 780)
+    win.show()
+    app.processEvents()
+    win.btn_details.setChecked(True)
+    for _ in range(5):
+        app.processEvents()
+    area = win._side_area
+    view = area.viewport()
+    top = win.details.mapTo(view, win.details.rect().topLeft()).y()
+    bottom = win.details.mapTo(view, win.details.rect().bottomLeft()).y()
+    assert area.verticalScrollBar().maximum() > 0, "放不下的時候要能捲"
+    assert 0 <= top and bottom <= view.height() + 8, (top, bottom, view.height())
+    # 關起來之後不必捲（捲軸自己消失）。
+    win.btn_details.setChecked(False)
+    for _ in range(5):
+        app.processEvents()
+    assert area.verticalScrollBar().maximum() == 0

@@ -41,6 +41,8 @@ recipe、先加一張卡、先接好線 —— 那不是「功能不存在」，
 `golden.stack_agreement` 問的是那幾格**彼此**對得多齊（`var(mean(cells)) /
 mean(var(cell))`，扣掉 `1/n` 的地板），無量綱、跨影像可比，所以它才是那個可以
 配固定門檻的數字。**人眼看那張圖 ＋ 這個數字，兩個一起才完整。**
+⚠ 2026-09-24 起那個數字**扣掉了雜訊**（`golden.measure_agreement`）—— 不扣的話
+雜訊大的圖上，對的週期也是紅燈（`docs/F120-pitch-helper.md` §30.2）。
 
 單位：px 是答案，nm 是換算
 --------------------------
@@ -72,14 +74,14 @@ import os
 from typing import Any, List, Optional, Sequence, Tuple
 
 import numpy as np
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import (
     QColor, QGuiApplication, QImage, QKeySequence, QPainter, QPixmap, QShortcut,
 )
 from PySide6.QtWidgets import (
     QAbstractSpinBox, QApplication, QCheckBox, QDoubleSpinBox, QFileDialog,
-    QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
-    QProgressBar, QPushButton, QVBoxLayout, QWidget,
+    QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
+    QMainWindow, QProgressBar, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from pitchapp.core.algo import period as algo_period
@@ -110,6 +112,7 @@ __all__ = [
     "BLURRED_BELOW",
     "VERDICT_OK", "VERDICT_BLURRED", "VERDICT_NONE", "VERDICT_TYPED",
     "VERDICT_CHECK", "VERDICT_BUSY_PERIOD", "VERDICT_BUSY_STACK",
+    "VERDICT_NOISY", "is_too_noisy",
     "CONF_TYPED", "TONE_GOOD", "TONE_WARN",
     "TONE_BAD", "CONF_GOOD_FROM", "AGREE_GOOD_FROM", "CELL_BOX",
     "BAR_W", "BAR_H", "candidate_periods", "candidate_label",
@@ -133,10 +136,11 @@ from .pitch_core import (
     MIN_PERIOD_PX, NEXT_STEP, Override, PHASE_PENDING, PITCH_NOT_USED,
     PITCH_UNSET,
     TONE_BAD, TONE_GOOD, TONE_WARN, VERDICT_BLURRED, VERDICT_BUSY_PERIOD,
-    VERDICT_BUSY_STACK, VERDICT_CHECK, VERDICT_NONE, VERDICT_OK,
+    VERDICT_BUSY_STACK, VERDICT_CHECK, VERDICT_NOISY, VERDICT_NONE, VERDICT_OK,
     VERDICT_TYPED, WINDOW_TITLE, agree_tone, axis_flags, candidate_label,
     candidate_periods, cells_along, conf_tone, detail_rows, effective_period,
-    lattice_periods, nm_text, pitch_rows, px_text, trim_to_inner, trust_note,
+    is_too_noisy, lattice_periods, nm_text, pitch_rows, px_text,
+    trim_to_inner, trust_note,
 )
 
 
@@ -334,10 +338,29 @@ class _PitchWorker(QThread):
         x0, y0, x1, y1 = box
         inner = self._image[y0:y1, x0:x1]
         ix, iy = int(round(ux)), int(round(uy))
+        origin = (0, 0)
+        if not (float(ux).is_integer() and float(uy).is_integer()):
+            # ⚠ **小數週期要疊重採樣過的像素**，跟 `build_golden_cell` 同一支
+            # （2026-09-24 修的）。這裡本來直接拿原圖用 ``round(79.5) = 80``
+            # 去疊：每格漂 0.5 px，一張乾淨的 79.5 圖剪完邊界之後一致性從
+            # 0.97 掉到 0.87，疊出來那一格也是糊的 —— 「Skip edge cells」
+            # 預設開著，所以每一個小數週期都踩得到。
+            inner = algo_template.resample_to_pitch(inner, ux, uy)
+            # 剪的那一刀落在 ``int(格線)``，差的那不到 1 px 換到重採樣後的座標。
+            ox = float(gc.origin[0] or 0.0) if flags[0] else 0.0
+            oy = float(gc.origin[1] or 0.0) if flags[1] else 0.0
+            origin = (int(round((ox + ux - x0) * ix / ux)) % max(1, ix)
+                      if flags[0] else 0,
+                      int(round((oy + uy - y0) * iy / uy)) % max(1, iy)
+                      if flags[1] else 0)
         before = gc                         # 剪完不划算的話要回得去（見下面）
-        cell = algo_golden.stack_cells(inner, ix, iy, method=self._method)
-        agree = algo_golden.stack_agreement(inner, ix, iy)
-        n = len(algo_golden.tile_coords(inner.shape, ix, iy))
+        cell = algo_golden.stack_cells(inner, ix, iy, method=self._method,
+                                       origin=origin)
+        # 雜訊在**這一塊**上估（疊的就是它）—— 見 `golden.measure_agreement`。
+        agree = algo_golden.measure_agreement(
+            inner, ix, iy, origin=origin,
+            noise_var=algo_golden.noise_variance(inner))
+        n = len(algo_golden.tile_coords(inner.shape, ix, iy, origin))
         if n < MIN_CELLS_AFTER_TRIM:
             # ⚠ **剪完什麼都不剩的話，要回到沒剪的那一份，不是報一個 0。**
             # `trim_to_inner` 已經擋掉格數太少的情形，但它算的是「沿著哪一軸
@@ -346,7 +369,9 @@ class _PitchWorker(QThread):
             # —— **一個算不出來的答案不准假裝成一個否定的答案**（同卡片那條
             # 「算不出來的那一格不寫」）。
             return before
-        gc.cell, gc.agreement = cell, agree
+        gc.cell = cell
+        gc.agreement, gc.agreement_raw = agree.value, agree.raw
+        gc.noise_frac = agree.noise_frac
         gc.ghosting, gc.lap_var, _e = algo_golden.ghosting_score(cell)
         gc.n_cells = n
         gc.trimmed = True                   # 畫面上要講出來（少了幾格是事實）
@@ -419,6 +444,20 @@ class PitchHelperWindow(QMainWindow):
         self._m: Optional[Any] = None                # 上一次的 MeasuredPeriod
         self._gc: Optional[Any] = None               # 上一次疊出來的 Golden Cell
         self._worker: Optional[_PitchWorker] = None
+        # ⚠ **只有最新那一次要求的結果准上畫面**（2026-09-24 修的競態）。
+        # 同一時間只跑一個 worker，而它在跑的時候使用者照樣拖得進、貼得進一張
+        # 新圖（拖放與 Ctrl+O／Ctrl+V 不看按鈕灰不灰）。本來的 `remeasure`
+        # 看到有 worker 就直接 return —— 新圖**沒有被量**，而舊圖的答案回來
+        # 之後落在新圖上：條紋圖上寫著「60 × 44 px ✓ Cells stack cleanly」。
+        # 所以：像素換了 `_img_gen` +1、每一次要求重量 `_req` +1；worker 帶著
+        # 它出生時的號碼，號碼對不上的結果一律丟掉；忙的時候進來的要求記在
+        # `_pending`，舊的那一個收尾之後立刻補跑。
+        self._img_gen = 0
+        self._req = 0
+        #: 忙的時候被要求重量：``None`` ＝ 沒有；否則是那一次的 ``reuse``。
+        self._pending: Optional[bool] = None
+        #: `typed_conf` 的快取 ``(key, value)`` —— 見那一支。
+        self._tc_cache: Optional[Tuple[Any, Override]] = None
         #: 量尺量到的 ``(axis, 長度 px)``；沒量就 None。
         self._measured: Optional[Tuple[str, float]] = None
         #: `_fill_warning` 這一輪有沒有話要說 —— 狀態行的判準（見 `verdict`）。
@@ -445,7 +484,25 @@ class PitchHelperWindow(QMainWindow):
         # 地方，不是它的 bug。
         split = HairlineSplitter(Qt.Horizontal, root)
         split.addWidget(self._image_side())
-        split.addWidget(self._answer_side())
+        # ⚠ **右欄包在一個捲軸裡**（2026-09-24）。它平常放得下（768 的筆電上
+        # 約 700 px，`test_the_right_column_fits_a_768_laptop` 守著），但 `▸
+        # Details` 一打開，那張表、那段說明、「What it decided」接在最下面 ——
+        # 780 高的視窗實拍：表的後兩列與整段說明都在視窗底邊以下，而畫面上
+        # 沒有任何東西說它們在那裡。捲軸只在真的放不下時出現；打開 Details
+        # 的那一刻自己捲到它（`_on_details`）。
+        # ⚠ 在**建構時**包，不是事後搬版面（`fit_screen` 的說明：事後搬是
+        # segfault）。最小寬要把捲軸的寬算進去 —— 不然捲軸一出來，380 px
+        # 量出來的那個最小寬就被吃掉一條，膠囊跟 Reset 又擠在一起。
+        self.answer_side = self._answer_side()
+        self._side_area = QScrollArea(root)
+        self._side_area.setWidgetResizable(True)
+        self._side_area.setFrameShape(QFrame.NoFrame)
+        self._side_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._side_area.setWidget(self.answer_side)
+        self._side_area.setMinimumWidth(
+            self.answer_side.minimumWidth()
+            + self._side_area.verticalScrollBar().sizeHint().width())
+        split.addWidget(self._side_area)
         split.setStretchFactor(0, 3)
         split.setStretchFactor(1, 1)
         split.setCollapsible(0, False)     # 圖收掉的話量尺就沒地方拉了
@@ -782,6 +839,9 @@ class PitchHelperWindow(QMainWindow):
         cap.setObjectName("paramHint")
         side.addWidget(cap)
         self.bar_agree = Bar(card, width=118)
+        self.bar_agree.setToolTip(
+            "How well the stacked cells match each other, 0 to 1, with the "
+            "image's noise taken out. Green from %.2f." % AGREE_GOOD_FROM)
         side.addWidget(self.bar_agree)
         self.lab_stack = QLabel("", card)
         self.lab_stack.setObjectName("paramHint")
@@ -820,6 +880,7 @@ class PitchHelperWindow(QMainWindow):
         self.grid_answer = QGridLayout()
         self.grid_answer.setHorizontalSpacing(8)
         self.grid_answer.setVerticalSpacing(2)
+        self._double_buttons: List[QPushButton] = []
         for i, nm in enumerate(("Repeat along X", "Repeat along Y")):
             # 那個軸向標籤本人就是這一行標題：`_fill_answer` 靠
             # `self._tags[i]` 的顯示／隱藏決定「這一軸算不算數」（X only 時
@@ -835,6 +896,31 @@ class PitchHelperWindow(QMainWindow):
             self._cells.append([QLabel(card), QLabel(card)])   # 舊介面的殘留
             self.grid_answer.addWidget(tag, i, 0)
             self.grid_answer.addWidget(bar, i, 1)
+            # ⚠ **×2 是一軸一顆，住在那一軸自己的那一列**（2026-09-24）。本來是
+            # 「Not the cell you want?」那一排的一顆、兩軸一起加倍 —— 而最常見
+            # 的取錯是**只有一軸**差一倍：每隔一根 fin 才有一個 contact，量到
+            # 20 × 45，真的是 40 × 45；兩軸一起加倍給的是 40 × 90，永遠到不了。
+            # 住在這一列是因為那一排在 380 px 寬時已經滿了（Y 那一格跟 ×2 實測
+            # 重疊 2 px），而這一列本來就是「這一軸」—— 沒在用的軸整列不見，
+            # 它也跟著不見。長得跟候選一樣（藍字、沒有框）：它是一個備案，不是
+            # 主要動作。
+            dbl = QPushButton("×2", card)
+            dbl.setProperty("variant", "ghost")
+            dbl.setProperty("clickableText", "true")
+            # ⚠ **跟那一列一樣高（bar 的 19 px），不是按鈕的 34。** 一顆一般高度
+            # 的鈕會把兩列各撐高十幾 px，pixel size 那一格就離它換算出來的 µm
+            # 越來越遠（`test_the_pixel_size_sits_with_what_it_converts` 守著）——
+            # 而右欄在 1366×768 上本來就只剩幾十 px。它沒有框，是一行可以點的字。
+            dbl.setFixedHeight(BAR_H + 8)
+            dbl.setStyleSheet("min-height:0px;max-height:%dpx;"
+                              "padding:0px 6px;" % (BAR_H + 8))
+            dbl.setToolTip(
+                "Double the %s period only — for when one cell of yours is two "
+                "of these repeats (a contact on every other line, two MG lines "
+                "making the unit you compare)." % ("X" if i == 0 else "Y"))
+            dbl.clicked.connect(lambda _c=False, k=i: self._on_double(k))
+            self._double_buttons.append(dbl)
+            self.grid_answer.addWidget(dbl, i, 2)
         self.grid_answer.setColumnStretch(1, 1)
         lay.addLayout(self.grid_answer)
         # ---- pixel size ＋ 把答案帶走 ---------------------------------------
@@ -915,21 +1001,16 @@ class PitchHelperWindow(QMainWindow):
         fix.addWidget(self.spin_px)
         fix.addWidget(QLabel("×", card))
         fix.addWidget(self.spin_py)
-        self.btn_double = QPushButton("×2", card)
-        self.btn_double.setToolTip(
-            "Double both — for when one cell of yours is two of the repeats it "
-            "measured (two MG lines making the unit you compare).")
-        self.btn_double.clicked.connect(self._on_double)
+        # ⚠ 這一排本來還有一顆「×2」（兩軸一起加倍）—— 2026-09-24 拆成一軸一顆，
+        # 搬到答案那一張卡的「Repeat along X／Y」那兩列（理由在那裡）。
         self.btn_reset = GlyphButton("undo", "Reset", parent=card)
         self.btn_reset.setToolTip("Back to the measured period.")
         self.btn_reset.clicked.connect(self._on_reset)
-        fix.addStretch(1)      # 兩格週期靠左成一對，×2／Reset 靠右
-        for b, cap in ((self.btn_double, 46), (self.btn_reset, 86)):
-            b.setProperty("variant", "secondary")
-            # ⚠ Reset 現在左邊多了一個圖示格，64 會把字切成 "Res…"。
-            # 寬度跟著內容走，不是兩顆抄同一個數字。
-            b.setMaximumWidth(cap)
-            fix.addWidget(b)
+        fix.addStretch(1)      # 兩格週期靠左成一對，Reset 靠右
+        self.btn_reset.setProperty("variant", "secondary")
+        # ⚠ Reset 左邊多了一個圖示格，64 會把字切成 "Res…"。
+        self.btn_reset.setMaximumWidth(86)
+        fix.addWidget(self.btn_reset)
         lay.addLayout(fix)
 
         # ---- 取錯了怎麼辦：諧波上的其他可能，點一下就套用 -------------------
@@ -1086,6 +1167,12 @@ class PitchHelperWindow(QMainWindow):
             return
         self._work = crop_array(self._full, self._crop)
         self._m = self._gc = None
+        self._tc_cache = None
+        # 像素換了：還在跑的那一份是**上一張圖**的，叫它停，回來的也不收。
+        self._img_gen += 1
+        self._req += 1
+        if self._worker is not None:
+            self._worker.stop()
         # ⚠ **底下的像素換了，剛剛量的那一段就不算了。** 留著的話那條綠帶會
         # 落在一張它從來沒有被拉過的圖上，而畫面不會說那是舊的。
         self._clear_ruler()
@@ -1096,23 +1183,64 @@ class PitchHelperWindow(QMainWindow):
             bits.append(crop)
         self.lab_source.setText(" · ".join(bits))
         self.view.set_image(self._work)
+        # ⚠ **舊答案現在就清掉，不是等新的量完。** 少了這一行，新圖載進來到
+        # 答案回來的那幾秒（4096² 約 10 秒）右欄寫的仍是上一張圖的 pitch 與
+        # 綠勾，格線也還是上一張的 —— `set_image` 的說明講的就是這件事，
+        # 而它本來只清了變數、沒有清畫面。
+        self._refresh()
 
     # -- 量 -----------------------------------------------------------------
     def remeasure(self, reuse: bool = False) -> None:
-        """量一次。``reuse=True`` 只重疊（軸向或週期改了，影像沒變）。"""
-        if self._work is None or self._worker is not None:
+        """量一次。``reuse=True`` 只重疊（軸向或週期改了，影像沒變）。
+
+        ⚠ **忙的時候不是丟掉這一次要求，是排隊**：叫正在跑的那一份停下來，
+        它收尾之後（`_on_finished`）用**當下的**設定補跑一次。本來這裡是
+        直接 return —— 於是跑的途中換了圖、或答案先到之後改了軸向，那一次
+        要求就安靜地消失了，而畫面最後停在舊圖或舊設定的結果上。
+        """
+        if self._work is None:
             return
-        self._worker = _PitchWorker(self._work, self.axis(),
-                                    self._m if reuse else None,
-                                    self.override(), self.stack_method(),
-                                    self.skip_edges(), self)
-        self._worker.stage.connect(self._say)
-        self._worker.answer.connect(self._on_answer)
-        self._worker.done.connect(self._on_done)
-        self._worker.finished.connect(self._on_finished)
+        self._req += 1
+        if self._worker is not None:
+            self._worker.stop()
+            reuse = bool(reuse)
+            # 兩次要求合成一次：只要有一次要重量，就重量。
+            self._pending = reuse if self._pending is None \
+                else (self._pending and reuse)
+            self._busy(True)
+            self._fill_state()
+            return
+        w = _PitchWorker(self._work, self.axis(),
+                         self._m if reuse else None,
+                         self.override(), self.stack_method(),
+                         self.skip_edges(), self)
+        w.req, w.img_gen = self._req, self._img_gen
+        self._worker = w
+        w.stage.connect(self._on_stage)
+        w.answer.connect(self._on_answer)
+        w.done.connect(self._on_done)
+        w.finished.connect(self._on_finished)
         self.progress.setVisible(True)
         self._busy(True)
-        self._worker.start()
+        self._fill_state()               # 狀態行現在就說「正在量」
+        w.start()
+
+    def _from_stale_worker(self, image_only: bool = False) -> bool:
+        """這個 slot 是不是被**過期的** worker 叫的（見 ``_req`` 的說明）。
+
+        ``image_only=True`` 只看像素有沒有換（量到的週期只跟像素有關；設定
+        改了不會讓它過期）。不是 worker 叫的（測試直接呼叫）一律不算過期。
+        """
+        w = self.sender()
+        if not isinstance(w, _PitchWorker):
+            return False
+        if image_only:
+            return getattr(w, "img_gen", self._img_gen) != self._img_gen
+        return getattr(w, "req", self._req) != self._req
+
+    def _on_stage(self, text: str) -> None:
+        if not self._from_stale_worker():
+            self._say(text)
 
     def _on_answer(self, m: Any) -> None:
         """週期量完了 —— **先把數字放上去**，證據等疊完再補。
@@ -1122,12 +1250,14 @@ class PitchHelperWindow(QMainWindow):
         圖，而它會先給一個錯的位置。所以 `_draw` 遇到「有週期、還沒有相位」
         就只說一句「正在找位置」。
         """
-        if m is None:
+        if m is None or self._from_stale_worker(image_only=True):
             return
         self._m, self._gc = m, None
         self._refresh()
 
     def _on_done(self, m: Any, gc: Any, err: str) -> None:
+        if self._from_stale_worker():
+            return                       # 上一張圖／上一組設定的，不准上畫面
         if err:
             self._say(err)
             return
@@ -1141,6 +1271,11 @@ class PitchHelperWindow(QMainWindow):
         self._worker = None
         self.progress.setVisible(False)
         self._busy(False)
+        pending, self._pending = self._pending, None
+        if pending is not None:
+            self.remeasure(reuse=pending)
+        else:
+            self._fill_state()
 
     def _clear_ruler(self) -> None:
         """量尺歸零（模式留著 —— 使用者按的那一顆鈕不會自己彈回去）。"""
@@ -1153,9 +1288,9 @@ class PitchHelperWindow(QMainWindow):
     #: 用法，而它填的值撐得過換圖。
     def _needs_image(self):
         return (self.btn_crop, self.chips_axis, self.spin_px, self.spin_py,
-                self.btn_double, self.btn_reset, self.chk_median,
+                self.btn_reset, self.chk_median,
                 self.chk_edges, self.chk_grid, self.btn_ruler,
-                self.btn_details)
+                self.btn_details) + tuple(self._double_buttons)
 
     def _sync_enabled(self) -> None:
         """**沒有圖的時候，按不出結果的東西要看起來按不出結果。**
@@ -1171,6 +1306,8 @@ class PitchHelperWindow(QMainWindow):
         has = self._work is not None and bool(np.asarray(self._work).size)
         for w in self._needs_image():
             w.setEnabled(has)
+        for b in self._double_buttons:        # ×2 要有一個量到的數字才翻得了倍
+            b.setEnabled(has and self._m is not None)
         if not has:                      # 關掉的模式不要留著
             self.btn_ruler.setChecked(False)
 
@@ -1205,12 +1342,19 @@ class PitchHelperWindow(QMainWindow):
         self._refresh()
         self.remeasure(reuse=True)
 
-    def _on_double(self) -> None:
-        """兩格一起 ×2（沒打過就從量到的那個翻倍）。"""
+    def _on_double(self, axis: int) -> None:
+        """**那一軸** ×2（沒打過就從量到的那個翻倍），另一軸不動。
+
+        ⚠ 2026-09-24 以前是兩軸一起翻倍 —— 見 `_period_card` 裡那兩顆的說明。
+        """
         if self._m is None:
             return
         ex, ey = effective_period(self._m, self.override())
-        self._set_override(min(8192.0, ex * 2.0), min(8192.0, ey * 2.0))
+        ox, oy = self.override()
+        if int(axis) == 0:
+            self._set_override(min(8192.0, ex * 2.0), float(oy or 0.0))
+        else:
+            self._set_override(float(ox or 0.0), min(8192.0, ey * 2.0))
 
     def _on_reset(self) -> None:
         self._set_override(0.0, 0.0)
@@ -1266,14 +1410,23 @@ class PitchHelperWindow(QMainWindow):
         那些格線切的就是它，分數跟它們講的必須是同一件事。
         每一軸沒打就是 ``None``（沒有分數要算），不是 0。
 
-        便宜得可以每次 refresh 都算：一條投影 ＋ 一次自相關，不是一次疊格子。
+        ⚠ **算一次就記住**（同一張圖、同一組打進去的數字）。它跑在 UI 執行緒
+        上，而一次 `_refresh` 會經由 `rows()`／`answer_text()`／`axis_number()`
+        問它五次 —— 4096² 上打一個週期，每次重畫要 **297 ms**：同一個答案
+        算了十遍（X、Y 各五次）。現在第一次 81 ms、之後 2 ms。快取在
+        `_apply_crop` 清掉（像素換了）。
         """
         ox, oy = self.override()
         work = self._work
         if work is None or not np.asarray(work).size:
             return (None, None)
-        return (algo_period.confidence_at(work, float(ox), "x") if ox else None,
-                algo_period.confidence_at(work, float(oy), "y") if oy else None)
+        key = (id(work), ox, oy)
+        if self._tc_cache is not None and self._tc_cache[0] == key:
+            return self._tc_cache[1]
+        got = (algo_period.confidence_at(work, float(ox), "x") if ox else None,
+               algo_period.confidence_at(work, float(oy), "y") if oy else None)
+        self._tc_cache = (key, got)
+        return got
 
     def rows(self) -> List[Tuple[str, str, str, str]]:
         """畫面上那兩列（測試讀這個，不必去挖 QLabel）。"""
@@ -1335,7 +1488,7 @@ class PitchHelperWindow(QMainWindow):
                          if num else "Nothing measured yet.")
         for i, (bar, tag) in enumerate(zip(self._bars, self._tags)):
             show = flags[i] if self._m is not None else True
-            for w in (tag, bar):
+            for w in (tag, bar, self._double_buttons[i]):
                 w.setVisible(show)
             if not show:
                 continue
@@ -1370,10 +1523,17 @@ class PitchHelperWindow(QMainWindow):
             b.deleteLater()
         self._try_buttons = []
         flags = self._flags()
+        h, w = (self._work.shape[:2] if self._work is not None else (0, 0))
         cands = (candidate_periods(self._m, flags,
-                                   effective_period(self._m, self.override()))
+                                   effective_period(self._m, self.override()),
+                                   limit=(w / 2.0, h / 2.0))
                  if self._m is not None else [])
         self.lab_try.setVisible(bool(cands))
+        # ⚠ **只放得下幾顆就放幾顆**（2026-09-24）。候選多了 ×3 之後，小數週期的
+        # 標籤會變長（`30 × 155.88`），四顆在 380 px 寬時被切掉一截。寬度照
+        # **最窄**的右欄算（`_answer_side` 的 380）：拖寬之後少放一顆，好過
+        # 拖窄之後切字。
+        room = 380 - 12 - self.lab_try.sizeHint().width() - self.row_try.spacing()
         for px, py in cands:
             b = QPushButton(candidate_label(px, py, flags), self.lab_try.parentWidget())
             # ⚠ **候選是備案，不是動作。** 這裡本來是 `secondary`（藍框），
@@ -1392,9 +1552,30 @@ class PitchHelperWindow(QMainWindow):
                 "Try this instead — it is one of the harmonics of what was "
                 "measured, and a wrong period is almost always one of these. "
                 "The grid and the stacked cell redraw so you can compare.")
-            b.clicked.connect(lambda _c=False, a=px, bb=py: self._set_override(a, bb))
+            b.clicked.connect(lambda _c=False, a=px, bb=py: self._apply_candidate(a, bb))
+            b.ensurePolished()
+            need = b.sizeHint().width() + self.row_try.spacing()
+            if self._try_buttons and need > room:
+                b.setParent(None)
+                b.deleteLater()
+                break
+            room -= need
             self.row_try.insertWidget(self.row_try.count() - 1, b)
             self._try_buttons.append(b)
+
+    def _apply_candidate(self, px: float, py: float) -> None:
+        """套用一個候選 —— **沒變的那一軸回到「measured」，不是把數字抄進去**。
+
+        ⚠ 週期欄只收一位小數（`_period_spin`）。候選 ``90 × 51.96`` 只改了 X，
+        而把 51.96 原樣寫進 Y 那一格會變成 52.0 —— 使用者點了一個「只改 X」的
+        候選，畫面卻說「Y: yours 52 vs measured 51.96」。跟量到的一樣的那一軸，
+        寫 0（＝用量到的），一個 bit 都不動。
+        """
+        m = self._m
+        mx = float(getattr(m, "px", 0.0) or 0.0) if m is not None else 0.0
+        my = float(getattr(m, "py", 0.0) or 0.0) if m is not None else 0.0
+        self._set_override(0.0 if abs(float(px) - mx) < 1e-6 else float(px),
+                           0.0 if abs(float(py) - my) < 1e-6 else float(py))
 
     def _fill_details(self) -> None:
         """三票各自的答案（折在 ``▸ Details`` 後面）。"""
@@ -1411,11 +1592,78 @@ class PitchHelperWindow(QMainWindow):
             "<br>Each row is one of the three ways it looks for a repeat; the "
             "number in brackets is that method's own confidence. They are "
             "allowed to disagree — that is a fact about the layout, not a "
-            "fault." % cells)
+            "fault.%s%s" % (cells, self._decided_note(), self._noise_note()))
+
+    def _doubts(self) -> List[str]:
+        """引擎的話裡**讓答案可疑**的那幾句（`MeasuredPeriod.doubts`）。
+
+        沒有這個欄位的東西（舊的、或測試做的假答案）當成每一句都可疑 ——
+        那是以前的行為，寧可多亮一次黃燈，也不要少講一句。
+        """
+        m = self._m
+        if m is None:
+            return []
+        if hasattr(m, "doubts"):
+            return list(m.doubts or [])
+        return list(getattr(m, "notes", None) or [])
+
+    def _decided_note(self) -> str:
+        """Details 裡的一句：引擎**自己修正過、而且沒有疑點**的那幾件事。"""
+        m = self._m
+        if m is None:
+            return ""
+        doubts = set(self._doubts())
+        done = [n for n in (getattr(m, "notes", None) or []) if n not in doubts]
+        if not done:
+            return ""
+        return "<br><br>What it decided: %s." % "; ".join(
+            str(n).rstrip(".") for n in done)
+
+    def _noise_note(self) -> str:
+        """Details 裡的一句：**雜訊扣掉了多少**（2026-09-24）。
+
+        `Cells agree` 現在是扣掉雜訊之後的數字 —— 扣之前是多少、雜訊佔幾成，
+        要查得到，不然那個數字就是一個不能驗算的黑盒子。
+        """
+        gc = self._gc
+        if gc is None or not getattr(gc, "n_cells", 0):
+            return ""
+        frac = float(getattr(gc, "noise_frac", 0.0) or 0.0)
+        if frac < 0.01:
+            return ""
+        # ⚠ **兩行以內**：Details 打開時右欄不會捲動，多一行就被視窗底邊切掉。
+        return ("<br><br>Noise taken out of Cells agree: about %d%% of each "
+                "cell's variation is noise (score before: %.2f).%s"
+                % (int(round(frac * 100)),
+                   float(getattr(gc, "agreement_raw", 0.0) or 0.0),
+                   " Too much to take out reliably." if is_too_noisy(gc)
+                   else ""))
 
     def _on_details(self, on: bool) -> None:
         self.btn_details.setText(("▾  Details" if on else "▸  Details"))
         self.details.setVisible(bool(on))
+        if on:
+            # 版面要先長出來才捲得到它 —— 下一輪事件迴圈再捲。
+            QTimer.singleShot(0, self._reveal_details)
+
+    def _reveal_details(self) -> None:
+        """把打開的 Details **整段**捲進畫面（放得下的時候什麼都不做）。
+
+        ⚠ 先讓版面算完：那段字是自動換行的，高度要等寬度定了才知道 ——
+        沒有這一步，捲到的位置是「還沒換行時」的那一個，最後一行落在底邊外。
+        Details 是右欄最底下那一塊，所以放得下的話捲到底就是整段都看得到；
+        比整個視窗還高的話，改成對齊它的頂端。
+        """
+        if not self.details.isVisible():
+            return
+        lay = self.answer_side.layout()
+        if lay is not None:
+            lay.activate()
+        area = self._side_area
+        if self.details.height() + 16 <= area.viewport().height():
+            area.verticalScrollBar().setValue(area.verticalScrollBar().maximum())
+        else:
+            area.ensureWidgetVisible(self.details, 0, 8)
 
     def show_cell_big(self) -> None:
         """疊出來那一格點一下 → 放大看。
@@ -1525,12 +1773,20 @@ class PitchHelperWindow(QMainWindow):
         # The cells landed on each other — this period is right.」—— 而那個
         # 結論旁邊就是一條綠色的長條寫著 0.98，字只是在重複顏色已經講完的事。
         # 使用者 2026-09-21：「UI 內字太多」。長的那一段留在 tooltip 裡。
+        # ⚠ **不准把「沒對齊」講成只有一個原因**（2026-09-24）。這裡本來寫
+        # 「look blurred? try ×2」與「this period is wrong」—— 而實測：週期
+        # 完全正確、只是雜訊大（σ=60）的圖拿到紅燈跟那一句；×2 疊出來的分數
+        # 跟原本一模一樣，那個建議從來救不了任何一張圖。雜訊現在已經從分數裡
+        # 扣掉了（`golden.measure_agreement`），剩下會讓格子對不齊的是：週期
+        # 差一點、影像轉了一個角度（轉 2° 就掉到 0.07）、或吵到扣不完。
         if tone == TONE_GOOD:
             word = "landed on each other."
+        elif is_too_noisy(gc):
+            word = "very noisy. Judge by the picture, not the number."
         elif tone == TONE_WARN:
-            word = "look blurred? try ×2."
+            word = "partly blurred. Check the picture."
         else:
-            word = "did not agree — this period is wrong."
+            word = "did not agree. Wrong period, or the image is rotated."
         edge = ", edges left out" if getattr(gc, "trimmed", False) else ""
         self.lab_stack.setText("%d cells%s — %s" % (n, edge, word))
 
@@ -1550,7 +1806,12 @@ class PitchHelperWindow(QMainWindow):
                              "image. Try Crop to leave out anything that is "
                              "not the repeating layout.")
             else:
-                lines.extend(getattr(self._m, "notes", None) or [])
+                # ⚠ **只放疑點，不放引擎自己做對的修正**（2026-09-24）。本來每一句
+                # 引擎的話都進這裡、也都讓狀態燈亮黃 —— 量過 195 張：量對的 144
+                # 張有 89 張亮黃燈，量錯的反而有 21 張打綠勾，燈號跟對錯幾乎
+                # 沒有關係。哪幾句算疑點是量出來的（`template._SELF_CORRECTIONS`）；
+                # 其他那幾句收進 Details 的「What it decided」。
+                lines.extend(self._doubts())
             note = ""
             if self._gc is not None and not nothing and self._work is not None:
                 ex, ey = effective_period(self._m, self.override())
@@ -1600,6 +1861,9 @@ class PitchHelperWindow(QMainWindow):
         ⚠ `good` 的條件是「**一個警告都沒有**」，不是「分數夠高」：一個錯的
         週期（真正週期的一半）每一格都是半個 cell，彼此照樣對得很齊，
         `Cells agree` 會很高。那一刻給綠勾等於替一個可能錯的答案背書。
+
+        ⚠ 「警告」從 2026-09-24 起**只算疑點**（`MeasuredPeriod.doubts`、格數
+        太少、信心太低），不算引擎自己做對的修正 —— 見 `_fill_warning`。
         """
         if self._work is None:
             return "", ""
@@ -1617,6 +1881,9 @@ class PitchHelperWindow(QMainWindow):
         # 說一句不表態的話。
         agree = float(getattr(self._gc, "agreement", 0.0) or 0.0)
         tone = agree_tone(agree)
+        if tone != TONE_GOOD and is_too_noisy(self._gc):
+            # 扣雜訊的倍數封頂了：低分可能只是「量不準」，不准講成「錯」。
+            return TONE_WARN, VERDICT_NOISY
         if tone != TONE_GOOD:
             return tone, VERDICT_BLURRED
         if any(self.override()):
@@ -1718,6 +1985,7 @@ class PitchHelperWindow(QMainWindow):
         self._load_path(str(path))
 
     def closeEvent(self, e) -> None:  # Qt hook
+        self._pending = None             # 關掉了就不要再補跑
         if self._worker is not None:
             self._worker.stop()
             self._worker.wait(3000)
