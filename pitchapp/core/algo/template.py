@@ -68,7 +68,7 @@ from . import period2d as algo_period2d
 
 __all__ = [
     "GoldenCell", "MatchResult", "MeasuredPeriod", "measure_period",
-    "build_golden_cell", "anchor_cell",
+    "build_golden_cell", "anchor_cell", "resample_to_pitch",
     "encode_cell", "decode_cell", "tile_cell", "match_patch",
     "patch_structure", "period_text", "MIN_PERIOD_CONFIDENCE", "SNAP_DRIFT_PX",
     "CELL_ENCODING",
@@ -128,7 +128,17 @@ class GoldenCell:
     lap_var: float = 0.0                # 未飽和的原始值（要比較大小時用這個）
     #: 那幾格**彼此**對得多齊，0–1（`golden.stack_agreement`，F40）。
     #: 無量綱、跨影像可比，所以**這一個**才是拿去跟門檻比的那個。
+    #:
+    #: ⚠ **2026-09-24 起是扣掉雜訊之後的**（`golden.measure_agreement`）。
+    #: F40 的數字在週期完全正確時等於「訊號佔每一格變異數的比例」，所以雜訊
+    #: 一大，對的週期也會掉到紅燈（實測 σ=60：0.31）。扣掉之前的那個數字在
+    #: :attr:`agreement_raw`。
     agreement: float = 0.0
+    #: 扣掉雜訊**之前**的一致性（F40 的原始定義）。
+    agreement_raw: float = 0.0
+    #: 每一格的變異數裡估計有幾成是雜訊（0–1）。≥ `golden.NOISE_FRACTION_CAP`
+    #: 時校正已封頂：這張圖太吵，分數只能當參考。
+    noise_frac: float = 0.0
     confidence_x: float = 0.0
     confidence_y: float = 0.0
     anchor: Tuple[int, int] = (0, 0)    # 為了錨定地標捲動了多少
@@ -411,6 +421,26 @@ def measure_period(gray: np.ndarray,
         candidates=list(est.candidates or []))
 
 
+def resample_to_pitch(gray: np.ndarray, px: float, py: float) -> np.ndarray:
+    """小數週期 → 把影像重採樣成**整數** pitch（``round(px)`` × ``round(py)``）。
+
+    整數週期時**原樣回傳同一個物件**（一個 byte 都不動）。做法與理由見
+    :func:`build_golden_cell` 的「小數週期」那一段。
+
+    ⚠ 這一行本來只住在 `build_golden_cell` 裡。2026-09-24 抽出來，因為
+    `ui/pitch_helper` 去邊界那一步（`_PitchWorker._without_edges`）要疊**同一種**
+    重採樣過的像素 —— 它本來直接拿原圖用 ``round(79.5) = 80`` 去疊，每格漂
+    0.5 px，一張乾淨的圖一致性從 0.97 掉到 0.87、疊出來那一格也是糊的。
+    """
+    px, py = float(px), float(py)
+    if px.is_integer() and py.is_integer():
+        return gray
+    h, w = gray.shape[:2]
+    sx, sy = int(round(px)) / px, int(round(py)) / py
+    return cv2.resize(gray, (int(round(w * sx)), int(round(h * sy))),
+                      interpolation=cv2.INTER_LINEAR)
+
+
 def build_golden_cell(image: Any, px: Optional[float] = None,
                       py: Optional[float] = None, method: str = "mean",
                       anchor: bool = True,
@@ -507,10 +537,7 @@ def build_golden_cell(image: Any, px: Optional[float] = None,
     ix, iy = int(round(px)), int(round(py))
     sx, sy = ix / px, iy / py
     fractional = not (px.is_integer() and py.is_integer())
-    work = gray
-    if fractional:
-        work = cv2.resize(gray, (int(round(w * sx)), int(round(h * sy))),
-                          interpolation=cv2.INTER_LINEAR)
+    work = resample_to_pitch(gray, px, py)
 
     # **相位搜尋是這一支的全部成本**（281 個候選 × 整張圖）—— 進度就報它。
     stop = [False]
@@ -544,7 +571,12 @@ def build_golden_cell(image: Any, px: Optional[float] = None,
     # 對得齊嗎」，而疊完之後那幾格已經不在了。用 `choose_origin` 挑的那個
     # origin —— 也就是真正被疊起來的那一組格子；`anchor_cell` 之後的捲動是
     # 整張一起移，不影響格子之間的一致性。
-    agreement = algo_golden.stack_agreement(work, ix, iy, origin=origin)
+    # ⚠ **雜訊要在疊的那一張上估**（2026-09-24）：小數週期時疊的是重採樣過
+    # 的 `work`，而雙線性內插會改變雜訊的大小與顏色 —— 在原圖上估就是拿另一
+    # 批像素的雜訊去校正這一批。
+    agree = algo_golden.measure_agreement(
+        work, ix, iy, origin=origin,
+        noise_var=algo_golden.noise_variance(work))
     # 錨定把 cell 往左（上）捲了 roll，等於格線原點往右（下）移 roll。
     eff_i = ((int(origin[0]) + int(roll[0])) % max(1, ix),
              (int(origin[1]) + int(roll[1])) % max(1, iy))
@@ -555,7 +587,9 @@ def build_golden_cell(image: Any, px: Optional[float] = None,
         # −0.003，再 mod 週期就繞成 79.499 —— 整整少畫一列格子）。
         eff = ((eff_i[0] / sx) % px, (eff_i[1] / sy) % py)
     return GoldenCell(cell=cell, px=ix, py=iy, ghosting=float(score),
-                      lap_var=float(lap_var), agreement=float(agreement),
+                      lap_var=float(lap_var), agreement=float(agree.value),
+                      agreement_raw=float(agree.raw),
+                      noise_frac=float(agree.noise_frac),
                       confidence_x=conf_x,
                       confidence_y=conf_y, anchor=roll, n_cells=int(n_cells),
                       periodic_x=periodic_x, periodic_y=periodic_y,
