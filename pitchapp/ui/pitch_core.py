@@ -21,7 +21,9 @@
 """
 from __future__ import annotations
 
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Sequence, Tuple
+
+import numpy as np
 
 from pitchapp.core.algo import period2d as algo_period2d
 from pitchapp.core.algo import template as algo_template
@@ -40,7 +42,9 @@ __all__ = [
     "axis_flags", "lattice_periods", "px_text", "nm_text", "cells_along",
     "trust_note", "candidate_periods", "candidate_label", "detail_rows",
     "trim_to_inner", "effective_period", "pitch_rows", "conf_tone",
-    "agree_tone",
+    "agree_tone", "VERDICT_EVERY_KTH", "every_kth_hint", "every_kth_card",
+    "every_kth_warning", "every_kth_note", "every_kth_caption",
+    "every_kth_title", "compare_strip", "scaled_period",
 ]
 
 # --------------------------------------------------------------------------- #
@@ -271,7 +275,8 @@ def trust_note(n_along: int) -> str:
 def candidate_periods(measured: Any, flags: Tuple[bool, bool],
                       current: Tuple[float, float],
                       cap: int = MAX_CANDIDATES,
-                      limit: Tuple[float, float] = (float("inf"), float("inf"))
+                      limit: Tuple[float, float] = (float("inf"), float("inf")),
+                      prefer: Optional[Tuple[float, float]] = None
                       ) -> List[Tuple[float, float]]:
     """「取錯怎麼辦」的答案：**諧波上的其他可能**，點一下就套用。
 
@@ -288,6 +293,10 @@ def candidate_periods(measured: Any, flags: Tuple[bool, bool],
     沒有任何一條路點得到它。排序：一軸 ×3 → 一軸 ÷2 → 一軸 ×2 → 兩軸一起的；
     一軸 ×2 排後面是因為每一軸自己那一列已經有一顆「×2」了。
     ``limit`` 是每一軸最大的週期（呼叫端給影像的一半：至少要放得下兩格）。
+
+    ``prefer``（2026-09-30）：「每隔 k 格不一樣」建議的那一組（:func:`every_kth_hint`）
+    **排第一個**，不在清單裡就補進去 —— 畫面底下那句警告叫人去「Or try」找它，
+    它就得在那裡、而且在最前面（×3 那種沒有一軸一顆的按鈕可按）。
     """
     cur_x, cur_y = float(current[0] or 0.0), float(current[1] or 0.0)
     mx = float(getattr(measured, "px", 0.0) or 0.0)
@@ -311,7 +320,10 @@ def candidate_periods(measured: Any, flags: Tuple[bool, bool],
 
     out: List[Tuple[float, float]] = []
     seen = set()
-    for cx, cy in sorted(pool, key=lambda c: kind(*c)):   # sorted 是穩定的
+    ordered = sorted(pool, key=lambda c: kind(*c))        # sorted 是穩定的
+    if prefer is not None:
+        ordered.insert(0, (float(prefer[0] or 0.0), float(prefer[1] or 0.0)))
+    for cx, cy in ordered:
         x = cx if flags[0] else cur_x
         y = cy if flags[1] else cur_y
         if flags[0] and (x < MIN_PERIOD_PX or x > float(limit[0])):
@@ -532,3 +544,115 @@ def agree_tone(value: float) -> str:
     if v >= BLURRED_BELOW:
         return TONE_WARN
     return TONE_BAD
+
+
+# --------------------------------------------------------------------------- #
+# 每隔 k 格不一樣（2026-09-30，使用者：「照這個做功能」）
+# --------------------------------------------------------------------------- #
+#: 狀態行（k → 那句話）。⚠ 要跟名字排在同一排（見 :data:`VERDICT_OK` 那一段）：
+#: 最長的「Every other cell differs」約 170 px，比「Measured — worth a check」短。
+VERDICT_EVERY_KTH = {2: "Every other cell differs", 3: "Every 3rd cell differs"}
+
+_EVERY = {2: "every other", 3: "every 3rd"}
+
+
+def every_kth_hint(gc: Any, lattice: Tuple[float, float]
+                   ) -> Optional[Tuple[int, int, float, float]]:
+    """``(軸 0/1, k, relevance, significance)``：畫面該講的那一個；沒有就 None。
+
+    讀 `GoldenCell.every_kth`（worker 算的，`template.every_kth_cell`），取
+    ``flagged`` 裡 relevance 最大的那一個。
+
+    ⚠ **只有在那一份疊圖用的就是現在的週期時才算數**（``lattice`` =
+    `lattice_periods` 現在的答案）。按下 ×2 之後、新的疊圖回來之前，畫面上
+    還是舊的那一份 —— 它說的「每隔一格不一樣」是**舊的週期**的事，而那一刻
+    底下的警告會算出「再按一次 ×2」，也就是 4 倍。
+    """
+    if gc is None:
+        return None
+    gx = float(getattr(gc, "period_x", 0.0) or 0.0)
+    gy = float(getattr(gc, "period_y", 0.0) or 0.0)
+    if abs(gx - float(lattice[0])) > 1e-6 or abs(gy - float(lattice[1])) > 1e-6:
+        return None
+    hits = [a for a in (getattr(gc, "every_kth", None) or [])
+            if getattr(a, "flagged", False) and int(a.k) in _EVERY]
+    if not hits:
+        return None
+    a = max(hits, key=lambda h: float(h.relevance))
+    return (0 if a.axis == "x" else 1, int(a.k), float(a.relevance),
+            float(a.significance))
+
+
+def scaled_period(current: Tuple[float, float], axis: int, k: float
+                  ) -> Tuple[float, float]:
+    """``current`` 只把 ``axis`` 那一軸乘上 ``k``。"""
+    x, y = float(current[0] or 0.0), float(current[1] or 0.0)
+    return (x * k, y) if int(axis) == 0 else (x, y * k)
+
+
+def every_kth_title(axis: int, k: int) -> str:
+    """``"Every other cell along X"``（對話框標題）。"""
+    return "%s cell along %s" % (_EVERY.get(int(k), "every %d" % k).capitalize(),
+                                 "XY"[int(axis)])
+
+
+def every_kth_card(axis: int, k: int) -> str:
+    """證據卡那一行（取代「landed on each other.」）。"""
+    return "%s cell along %s is different." % (_EVERY.get(int(k), "every %d" % k),
+                                               "XY"[int(axis)])
+
+
+def every_kth_warning(axis: int, k: int, suggested: Tuple[float, float],
+                      flags: Tuple[bool, bool]) -> str:
+    """底下那條警告：**哪裡不一樣 → 所以真的單元多大 → 按哪裡**。"""
+    name = "XY"[int(axis)]
+    how = ("press ×2 on the %s row" % name if int(k) == 2
+           else "pick it under “Or try”")
+    return ("%s along %s looks different from its neighbours, so the repeating "
+            "unit is probably %s — %s."
+            % (every_kth_title(axis, k).split(" along ")[0], name,
+               candidate_label(suggested[0], suggested[1], flags), how))
+
+
+def every_kth_note(axis: int, k: int, relevance: float,
+                   significance: float) -> str:
+    """Details 裡的一句：**數字本人**，讓那個提醒可以驗算。"""
+    return ("%s: the part that differs is %.1f%% of each cell's variation "
+            "(%s× what noise alone gives)."
+            % (every_kth_title(axis, k), 100.0 * float(relevance),
+               "%.0f" % significance if significance < 1e4 else "over 10,000"))
+
+
+def every_kth_caption(k: int) -> str:
+    """對話框底下那一句：**三張（四張）圖各是什麼**。"""
+    k = int(k)
+    groups = ["cells %s …" % ", ".join(str(c + 1 + j * k) for j in range(3))
+              for c in range(k)]
+    return ("Left to right: %s stacked separately, then where they differ "
+            "(brightened). Wheel zooms, drag pans." % " · ".join(groups))
+
+
+def compare_strip(stacks: Sequence[Any], gap: int = 0) -> np.ndarray:
+    """k 張分類疊圖 ＋ 一張「差在哪裡」**並排成一張** uint8。
+
+    前 k 張**共用同一個灰階範圍**（各自拉滿的話亮度就比不了，而亮度的差正是
+    要看的東西）；最後一張是每個像素在 k 張之間的最大差，**自己拉滿**——
+    差異常常只有幾個灰階，不拉就看不到。中間隔一條中灰。
+    """
+    arrs = [np.asarray(a, np.float64) for a in stacks]
+    if not arrs or arrs[0].size == 0:
+        return np.zeros((0, 0), np.uint8)
+    lo = min(float(a.min()) for a in arrs)
+    hi = max(float(a.max()) for a in arrs)
+    span = hi - lo
+    panels = [(a - lo) * (255.0 / span) if span > 0 else np.zeros_like(a)
+              for a in arrs]
+    diff = np.max(arrs, axis=0) - np.min(arrs, axis=0)
+    top = float(diff.max())
+    panels.append(diff * (255.0 / top) if top > 0 else np.zeros_like(diff))
+    h, w = arrs[0].shape[:2]
+    g = int(gap) if gap else max(2, w // 6)
+    out = np.full((h, len(panels) * w + (len(panels) - 1) * g), 128.0)
+    for i, p in enumerate(panels):
+        out[:, i * (w + g):i * (w + g) + w] = p
+    return np.clip(np.round(out), 0, 255).astype(np.uint8)

@@ -68,7 +68,8 @@ from . import period2d as algo_period2d
 
 __all__ = [
     "GoldenCell", "MatchResult", "MeasuredPeriod", "measure_period",
-    "build_golden_cell", "anchor_cell", "resample_to_pitch",
+    "build_golden_cell", "anchor_cell", "resample_to_pitch", "every_kth_cell",
+    "every_kth_stacks",
     "encode_cell", "decode_cell", "tile_cell", "match_patch",
     "patch_structure", "period_text", "MIN_PERIOD_CONFIDENCE", "SNAP_DRIFT_PX",
     "CELL_ENCODING",
@@ -166,6 +167,10 @@ class GoldenCell:
     #: 量週期時自動做的**決定**（換了量法、加倍了）—— 每一句都要讓使用者看到
     #: （`ui/template_dialog.summary`）。它們同時也在 ``warnings`` 裡（F104 的相容）。
     notes: List[str] = field(default_factory=list)
+    #: 「每隔 k 格有一格不一樣」（:func:`every_kth_cell`，`golden.Alternation`
+    #: 的清單）。⚠ **`build_golden_cell` 不填它** —— 要的人自己叫（`ui/
+    #: pitch_helper` 的 worker），所以空的清單是「沒問過」，不是「問過了、沒有」。
+    every_kth: List[Any] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         # 位置參數建出來的舊呼叫（`GoldenCell(cell=…, px=8, py=8)`）沒給週期：
@@ -478,6 +483,95 @@ def resample_to_pitch(gray: np.ndarray, px: float, py: float) -> np.ndarray:
     sx, sy = int(round(px)) / px, int(round(py)) / py
     return cv2.resize(gray, (int(round(w * sx)), int(round(h * sy))),
                       interpolation=cv2.INTER_LINEAR)
+
+
+#: `every_kth_cell` 比較之前先模糊多少（高斯 σ，像素）。見那一支的說明。
+EVERY_KTH_BLUR = 1.0
+#: `every_kth_cell` 在大圖上只看中間這麼大一塊（像素，每一軸；但至少 14 格）。
+EVERY_KTH_SIDE = 2048
+
+
+def every_kth_cell(image: Any, px: float, py: float,
+                   origin: Tuple[float, float] = (0.0, 0.0),
+                   axes: Tuple[bool, bool] = (True, True)
+                   ) -> List[algo_golden.Alternation]:
+    """「每隔 k 格有一格不一樣」（`golden.cell_alternation`），吃**原圖**與小數週期。
+
+    做的事跟 `build_golden_cell` 疊之前一樣：小數週期先重採樣成整數 pitch
+    （`resample_to_pitch`），``origin``（原圖座標，`GoldenCell.origin`）換到
+    重採樣後的座標，雜訊在**那一張**上估。``axes`` 為 ``False`` 的那一軸沒有
+    週期 —— 傳進來的週期是整張影像的長度（`build_golden_cell` 的一維規則），
+    那一軸不看。
+
+    ⚠ **先模糊 1 px 再比**（:data:`EVERY_KTH_BLUR`）。像素格子本身會造出
+    「每隔 k 格不一樣」：週期 30.33 px 的時候，第 0、3、6… 格落在同一個取樣
+    相位，其他格各差 1/3 px —— 重採樣（或原本就沒對齊的取樣）讓邊緣在這三種
+    相位上銳利度不一樣。實測一張**完全沒有雜訊、邊緣銳利**的 30.33 圖，不模糊
+    的話 k=3 的 relevance 0.0030，剛好誤報；模糊 1 px 之後 0.0003（小十倍）。
+    版圖上真的「多一個東西」都比 2 px 大，模糊碰不到它。雜訊的理論值跟著
+    縮成 ``1 / (4πσ²)``（白雜訊經過高斯模糊之後的變異數）。
+
+    ⚠ **這一支不在 `build_golden_cell` 裡。** 它只回答一個提醒（不改任何
+    數字），而 `build_golden_cell` 被很多地方叫 —— 要的人自己叫
+    （`ui/pitch_helper` 的 worker）。
+    """
+    arr = np.asarray(image)
+    # 已經是灰階 uint8（worker 給的就是）就不再轉：`_gray_u8` 在 4096² 上要
+    # 150 MB 的暫存，比這一支其他所有東西加起來還多。
+    gray = arr if arr.ndim == 2 and arr.dtype == np.uint8 else _gray_u8(arr)
+    px, py = float(px or 0.0), float(py or 0.0)
+    if gray.size == 0 or px < 2 or py < 2:
+        return []
+    ix, iy = int(round(px)), int(round(py))
+    # 大圖只看中間一塊（:data:`EVERY_KTH_SIDE`；每一軸至少 14 格）：4096² 整張
+    # 要 1.35 s、峰值 245 MB，而那麼多格對這個問題沒有多說什麼。原點跟著
+    # 換到那一塊的座標。
+    h, w = gray.shape[:2]
+    cw = w if not axes[0] else min(w, max(EVERY_KTH_SIDE, int(14 * px) + 1))
+    ch = h if not axes[1] else min(h, max(EVERY_KTH_SIDE, int(14 * py) + 1))
+    x0, y0 = (w - cw) // 2, (h - ch) // 2
+    gray = gray[y0:y0 + ch, x0:x0 + cw]
+    s = EVERY_KTH_BLUR
+    smooth = cv2.GaussianBlur(gray.astype(np.float32), (0, 0), s)
+    work = resample_to_pitch(smooth, px, py)
+    ox = (int(round(((float(origin[0] or 0.0) - x0) % px) * ix / px)) % ix
+          if axes[0] else 0)
+    oy = (int(round(((float(origin[1] or 0.0) - y0) % py) * iy / py)) % iy
+          if axes[1] else 0)
+    return algo_golden.cell_alternation(
+        work, ix, iy, origin=(ox, oy), axes=(bool(axes[0]), bool(axes[1])),
+        noise_var=algo_golden.noise_variance(gray) / (4.0 * math.pi * s * s))
+
+
+def every_kth_stacks(image: Any, px: float, py: float,
+                     origin: Tuple[float, float] = (0.0, 0.0),
+                     axes: Tuple[bool, bool] = (True, True),
+                     axis: int = 0, k: int = 2) -> List[np.ndarray]:
+    """沿著 ``axis`` 把格子分成 ``k`` 類（第 0、k、2k… 格一類），**每一類各疊一張**。
+
+    「每隔一格不一樣」要讓人**看得到**，不是只給一個數字：兩張並排，差在哪裡
+    一眼就知道（`ui/pitch_helper` 的 “Compare them”）。格子跟 :func:`every_kth_cell`
+    量的是同一組（同樣的重採樣、同樣的原點）。回平均值（float64，``(py, px)``），
+    任何一類一格都沒有就回空清單。
+    """
+    gray = _gray_u8(image)
+    px, py = float(px or 0.0), float(py or 0.0)
+    k = int(k)
+    if gray.size == 0 or px < 2 or py < 2 or k < 2:
+        return []
+    ix, iy = int(round(px)), int(round(py))
+    work = resample_to_pitch(gray, px, py)
+    ox = int(round(float(origin[0] or 0.0) * ix / px)) % ix if axes[0] else 0
+    oy = int(round(float(origin[1] or 0.0) * iy / py)) % iy if axes[1] else 0
+    sums = [np.zeros((iy, ix), np.float64) for _ in range(k)]
+    counts = [0] * k
+    for x, y in algo_golden.tile_coords(work.shape, ix, iy, (ox, oy)):
+        c = ((x - ox) // ix if int(axis) == 0 else (y - oy) // iy) % k
+        sums[c] += work[y:y + iy, x:x + ix]
+        counts[c] += 1
+    if min(counts) < 1:
+        return []
+    return [s / n for s, n in zip(sums, counts)]
 
 
 def build_golden_cell(image: Any, px: Optional[float] = None,

@@ -438,6 +438,186 @@ def measure_agreement(image: np.ndarray, px: int, py: int,
     return Agreement(float(np.clip(a / signal, 0.0, 1.0)), plain, frac, n)
 
 
+# --------------------------------------------------------------------------- #
+# 每隔 k 格有一格不一樣（2026-09-30）
+# --------------------------------------------------------------------------- #
+#: 「每隔 k 格不一樣」要多明顯才講。兩個條件**都要**過：
+#:
+#: ``relevance``
+#:     交替的那一部分佔一格訊號變異數的比例（0–1）。擋的是「真的有，但小到
+#:     看不出來」—— 那種講了只會讓人去找一個找不到的東西。
+#: ``significance``
+#:     它是「純雜訊也會量到的那麼多」的幾倍。擋的是雜訊。
+#:
+#: 量出來的（`docs/F120-pitch-helper.md` §34，經 `template.every_kth_cell`）：
+#: 週期量對的 825 張（擬真圖 233、模擬截圖 143、極端雜訊 232、條紋 217）
+#: **一張都沒有誤報**；它們裡面 significance ≥ 5 的最大 relevance 是 0.0014
+#: （門檻的一半）。真的是超晶格、量成一半的 60 張抓到 19 張 —— 強的那一種 22 張
+#: 抓到 19 張，弱的（多出來的東西只佔一格變異數的 0.2%）一張都沒抓。弱的漏掉
+#: 是刻意選的那一邊：這一條只是提醒，誤報會讓人去懷疑一個對的答案。
+ALT_MIN_RELEVANCE = 0.003
+ALT_MIN_SIGNIFICANCE = 5.0
+#: 看哪幾種「每隔 k 格」。
+ALT_KS = (2, 3)
+#: 一條線上至少要 ``3k + 2`` 格（二次差分吃掉頭尾兩格，每一類至少三格）；
+#: 橫向至少要這麼多條線（雜訊的對照要把線分成兩半）。
+_ALT_MIN_LINES = 3
+#: 沒有週期的那一軸（一維的 layout）切成幾條「線」。
+_ALT_STRIPS = 8
+#: 大圖只取一部分的線（均勻挑），記憶體與時間才不會跟著影像長 ——
+#: 時間幾乎全花在逐像素中位數上（一軸一個 k 要三次：全部、兩半各一）。
+#: 1.5 M 像素時 20 × 45 的格子每一類仍有七百多格。
+_ALT_MAX_PIXELS = 1_500_000
+
+
+@dataclass(frozen=True)
+class Alternation:
+    """一軸上「每隔 ``k`` 格有一格不一樣」有多強（:func:`cell_alternation`）。"""
+
+    axis: str               # "x" 或 "y"
+    k: int
+    #: 交替的那一部分佔一格訊號變異數的比例（0–1）。
+    relevance: float
+    #: 比雜訊的預期值大幾倍（≥ 0）。
+    significance: float
+    #: 格與格之間的變化（二次差分）有幾成被「每隔 k 格」這個樣式解釋掉。
+    fit: float = 0.0
+    #: 這一軸上所有的 ``k`` 裡，``fit`` 最好的是不是這一個。
+    best: bool = True
+
+    @property
+    def flagged(self) -> bool:
+        """兩道門檻都過了、而且是這一軸最像的那個 ``k`` —— 畫面上要講。"""
+        return (self.best and self.relevance >= ALT_MIN_RELEVANCE
+                and self.significance >= ALT_MIN_SIGNIFICANCE)
+
+
+def _class_medians(d: np.ndarray, k: int) -> Tuple[np.ndarray, List[np.ndarray]]:
+    """``d[line, pos, …]`` 每一類（``pos % k``）的逐像素中位數。"""
+    cls = np.arange(1, d.shape[1] + 1) % k   # d[:, i] 是第 i+1 格（頭一格被差分吃掉）
+    return cls, [np.median(d[:, cls == c].reshape((-1,) + d.shape[2:]), axis=0)
+                 for c in range(k)]
+
+
+def _contrast(meds: List[np.ndarray], k: int) -> np.ndarray:
+    """k 個類的值在頻率 1/k 的那一項。"""
+    return sum(m * np.exp(-2j * np.pi * c / k) for c, m in enumerate(meds)) / k
+
+
+def cell_alternation(image: np.ndarray, px: int, py: int,
+                     origin: Tuple[int, int] = (0, 0),
+                     axes: Tuple[bool, bool] = (True, True),
+                     noise_var: float = 0.0) -> List[Alternation]:
+    """「每隔 k 格有一格不一樣」—— 週期可能其實是 ``k`` 倍（2026-09-30）。
+
+    為什麼要有它
+    ------------
+    一個格子裡的東西**每隔一格才出現一次**（兩層疊在一起、上層的週期是下層的
+    兩倍）時，量週期的那一層常常量到下層的週期：兩格裡有一格多了一點東西，
+    自相關在 1 倍的地方已經很高。疊出來那一格**看起來完全正常**（一致性
+    0.9 以上）—— 因為多出來的那一點被平均成一半的亮度，而一致性量的是
+    「格子彼此像不像」，不是「有沒有一半的格子不一樣」。所以要另外問。
+
+    怎麼量
+    ------
+    沿著這一軸，第 ``j`` 格的**二次差分** ``d_j = cell_j − (cell_{j−1} +
+    cell_{j+1}) / 2``：影像旋轉、放大率漂移讓格子沿著這一軸**線性地**變，
+    二次差分把它整個消掉，而每隔 k 格的差異照樣留著。每一類
+    （``j mod k``）在**所有線、所有位置**上取**逐像素中位數**（缺陷、量測條
+    只佔少數格，中位數看不到它們），再取這 k 個值在頻率 1/k 的那一項 ``Z``：
+    ``E = mean(|Z|²)``。
+
+    雜訊會量到多少（對照）
+    ----------------------
+    取兩者**較大**的那一個（保守）：
+
+    * **把線分成兩半**（奇數條／偶數條）各算一次 ``Z``，兩者的差只有雜訊
+      （真的交替兩半都一樣，相減就消掉）。這個對照吃得下「相鄰像素相關的
+      雜訊」—— 縮放過的截圖、JPEG、掃描方向的拖尾 —— 而那些正是
+      :func:`noise_variance` 幾乎估不到的；
+    * ``noise_var`` 推出來的理論值（中位數的效率 π/2、差分的放大）。
+
+    ``relevance`` = 扣掉對照之後的交替變異數 ÷ 一格的訊號變異數；
+    ``significance`` = ``E`` ÷ 對照。門檻見 :data:`ALT_MIN_RELEVANCE`。
+
+    是 2 還是 3
+    -----------
+    ⚠ 真的是「每隔一格」的時候，「每隔三格」的分數**也會很高** —— 每一類
+    （``j mod 3``）裡一半是 A 一半是 B，中位數落在哪一邊看運氣，而落在哪一邊
+    都算成一個差異（乾淨的合成圖上 k=3 的 relevance 甚至比 k=2 高）。所以每一軸
+    再問一次**哪一個 k 解釋得比較好**：每一格的差分減掉它那一類的中位數，剩下
+    的越少越好（``fit``）。只有最好的那個 ``k`` 會 ``flagged``。
+
+    ``image`` 是**整數 pitch** 的那一張（小數週期要先重採樣，同
+    :func:`measure_agreement`；`template.every_kth_cell` 會做）。``axes`` 為
+    ``False`` 的那一軸不看，而且它上面沒有週期：那一軸切成
+    :data:`_ALT_STRIPS` 條當成「線」（一維的條紋也問得到「每隔一條不一樣」）。
+    格子不夠的軸回不出答案 —— 那就**不在清單裡**，不是一個 0。
+    """
+    g = np.asarray(_to_gray(image))
+    if g.ndim != 2 or g.size == 0:
+        return []
+    px, py = int(px), int(py)
+    nv = max(0.0, float(noise_var or 0.0))
+    out: List[Alternation] = []
+    for ai, name in ((0, "x"), (1, "y")):
+        if not axes[ai]:
+            continue
+        a = g if ai == 0 else g.T                  # 這一軸 → 第二維
+        p = px if ai == 0 else py
+        o = int(origin[ai]) % max(1, p)
+        if axes[1 - ai]:
+            q = py if ai == 0 else px
+            oq = int(origin[1 - ai]) % max(1, q)
+        else:
+            q, oq = max(1, a.shape[0] // _ALT_STRIPS), 0
+        if p < 2 or q < 1:
+            continue
+        n_lines = (a.shape[0] - oq) // q
+        n_pos = (a.shape[1] - o) // p
+        if n_lines < _ALT_MIN_LINES or n_pos < 3 * min(ALT_KS) + 2:
+            continue
+        keep = max(_ALT_MIN_LINES,
+                   min(n_lines, _ALT_MAX_PIXELS // max(1, n_pos * p * q)))
+        lines = np.unique(np.linspace(0, n_lines - 1, keep).round().astype(int))
+        blk = np.stack([a[oq + i * q:oq + (i + 1) * q, o:o + n_pos * p]
+                        for i in lines]).astype(np.float32)
+        blk = blk.reshape(len(lines), q, n_pos, p).transpose(0, 2, 1, 3)
+        signal = float(blk.var(axis=(2, 3)).mean()) - nv
+        d = blk[:, 1:-1] - 0.5 * (blk[:, :-2] + blk[:, 2:])
+        del blk
+        n_l = d.shape[0]
+        total = float(np.mean((d - d.mean(axis=(0, 1))) ** 2))
+        half_a, half_b = d[0::2], d[1::2]
+        la, lb = half_a.shape[0], half_b.shape[0]
+        found = []
+        for k in ALT_KS:
+            if n_pos < 3 * k + 2:
+                continue
+            cls, meds = _class_medians(d, k)
+            e = float(np.mean(np.abs(_contrast(meds, k)) ** 2))
+            split = (_contrast(_class_medians(half_a, k)[1], k)
+                     - _contrast(_class_medians(half_b, k)[1], k))
+            # 兩半的差的變異數 = var(Z_a) + var(Z_b)；Z（全部的線）的是它的
+            # la·lb / L² 倍（中位數的變異數跟樣本數成反比）。
+            e_split = float(np.mean(np.abs(split) ** 2)) * la * lb / n_l ** 2
+            per_class = min(int(np.sum(cls == c)) for c in range(k)) * n_l
+            e_noise = (np.pi / 2.0) * 2.0 * nv / (k * max(1, per_class))
+            e_null = max(e_split, e_noise, 1e-12)
+            gain = 1.0 - np.cos(2.0 * np.pi / k)   # 二次差分在頻率 1/k 的增益
+            v_alt = max(e - e_null, 0.0) / gain ** 2 * (1.0 if k == 2 else 2.0)
+            rel = v_alt / signal if signal > 1e-9 else 0.0
+            resid = sum(float(np.sum((d[:, cls == c] - meds[c]) ** 2))
+                        for c in range(k)) / float(d.size)
+            fit = 1.0 - resid / total if total > 1e-12 else 0.0
+            found.append((k, float(min(max(rel, 0.0), 1.0)), float(e / e_null),
+                          float(fit)))
+        top = max((f[3] for f in found), default=0.0)
+        out.extend(Alternation(name, k, rel, sig, fit, fit >= top)
+                   for k, rel, sig, fit in found)
+    return out
+
+
 # ``refine_period`` / ``candidate_periods`` were deleted on 2026-08-27 (F40).
 # They came in with the vendored module and never gained a production caller —
 # ``estimate_period`` finds the period by autocorrelation and never asks this

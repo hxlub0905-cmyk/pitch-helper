@@ -70,6 +70,7 @@ overflow 過一次（F48）。這是一個**問一個數字**的工具，不是�
 """
 from __future__ import annotations
 
+import html
 import os
 from typing import Any, List, Optional, Sequence, Tuple
 
@@ -90,6 +91,7 @@ from pitchapp.core.algo import template as algo_template
 from pitchapp.core.log import swallowed
 
 from . import branding, fit_screen, theme
+from .buttons import mark_primary
 from .chips import ChoiceChips
 from .crop_dialog import CropDialog, crop_array, describe_crop
 from .icons import GlyphButton
@@ -118,7 +120,8 @@ __all__ = [
     "BAR_W", "BAR_H", "candidate_periods", "candidate_label",
     "detail_rows", "trust_note", "MIN_CELLS_TO_TRUST",
     "MAX_CANDIDATES", "cells_along", "trim_to_inner", "NEXT_STEP",
-    "MIN_CELLS_AFTER_TRIM", "run",
+    "MIN_CELLS_AFTER_TRIM", "run", "VERDICT_EVERY_KTH", "every_kth_hint",
+    "compare_strip",
 ]
 
 # ⚠ **不碰 widget 的那一半住在 `pitch_core`**（2026-09-22 拆的，F120 第十七
@@ -136,11 +139,13 @@ from .pitch_core import (
     MIN_PERIOD_PX, NEXT_STEP, Override, PHASE_PENDING, PITCH_NOT_USED,
     PITCH_UNSET,
     TONE_BAD, TONE_GOOD, TONE_WARN, VERDICT_BLURRED, VERDICT_BUSY_PERIOD,
-    VERDICT_BUSY_STACK, VERDICT_CHECK, VERDICT_NOISY, VERDICT_NONE, VERDICT_OK,
-    VERDICT_TYPED, WINDOW_TITLE, agree_tone, axis_flags, candidate_label,
-    candidate_periods, cells_along, conf_tone, detail_rows, effective_period,
+    VERDICT_BUSY_STACK, VERDICT_CHECK, VERDICT_EVERY_KTH, VERDICT_NOISY,
+    VERDICT_NONE, VERDICT_OK, VERDICT_TYPED, WINDOW_TITLE, agree_tone,
+    axis_flags, candidate_label, candidate_periods, cells_along, compare_strip,
+    conf_tone, detail_rows, effective_period, every_kth_caption, every_kth_card,
+    every_kth_hint, every_kth_note, every_kth_title, every_kth_warning,
     is_too_noisy, lattice_periods, nm_text, pitch_rows, px_text,
-    trim_to_inner, trust_note,
+    scaled_period, trim_to_inner, trust_note,
 )
 
 
@@ -303,6 +308,8 @@ class _PitchWorker(QThread):
                     progress=self._tick)
                 if self._skip_edges and gc is not None and gc.cell.size:
                     gc = self._without_edges(gc, ux, uy, flags)
+                if gc is not None and gc.cell.size and not self._stop:
+                    gc.every_kth = self._every_kth(ux, uy, gc.origin, flags)
         except Exception as e:           # 講出來，不要吞掉（鐵則 7 的 UI 版）
             self.done.emit(None, None, "Could not measure this image: %s" % e)
         else:
@@ -376,6 +383,23 @@ class _PitchWorker(QThread):
         gc.n_cells = n
         gc.trimmed = True                   # 畫面上要講出來（少了幾格是事實）
         return gc
+
+    def _every_kth(self, ux: float, uy: float, origin: Any,
+                   flags: Tuple[bool, bool]) -> List[Any]:
+        """「每隔 k 格不一樣」（`template.every_kth_cell`，2026-09-30）。
+
+        ⚠ **它只是一個提醒，算不出來不准弄壞答案。** 這一段本來就包在上面那個
+        ``except`` 裡，而那一個會把整次量測講成「Could not measure this
+        image」—— 為了一句提醒丟掉一個已經算好的週期，本末倒置。記下來、
+        回空的清單（＝沒話要說）。
+        """
+        self.stage.emit("Comparing neighbouring cells…")
+        try:
+            return list(algo_template.every_kth_cell(self._image, ux, uy,
+                                                     origin, flags))
+        except Exception:
+            swallowed("ui.pitch_helper._PitchWorker._every_kth")
+            return []
 
     def _tick(self, stage: str, done: int = 0, total: int = 0) -> bool:
         """進度講到哪一步 **而且講到第幾格** —— 7680² 要十幾秒，一條跑不完的
@@ -846,6 +870,8 @@ class PitchHelperWindow(QMainWindow):
         self.lab_stack = QLabel("", card)
         self.lab_stack.setObjectName("paramHint")
         self.lab_stack.setWordWrap(True)
+        # 「每隔一格不一樣」的時候這一行帶一個 “Compare them ›” 連結（`_fill_stack`）。
+        self.lab_stack.linkActivated.connect(lambda _h: self.show_every_kth())
         side.addWidget(self.lab_stack)
         side.addStretch(1)
         lay.addLayout(side, 1)
@@ -992,8 +1018,12 @@ class PitchHelperWindow(QMainWindow):
         b.setProperty("variant", "ghost")
         b.setProperty("clickableText", "true")
         b.setFixedHeight(BAR_H + 8)
-        b.setStyleSheet("min-height:0px;max-height:%dpx;padding:0px 6px;"
-                        % (BAR_H + 8))
+        base = "min-height:0px;max-height:%dpx;padding:0px 6px;" % (BAR_H + 8)
+        b.setStyleSheet(base)
+        # `_mark_every_kth` 會加一個框再拿掉 —— 原本的樣子要記得。
+        b.setProperty("baseStyle", base)
+        b.setProperty("baseTip", tip)
+        b.setProperty("suggested", False)
         b.setToolTip(tip)
         return b
 
@@ -1488,6 +1518,7 @@ class PitchHelperWindow(QMainWindow):
         """一次把畫面對齊到目前的狀態 —— **只有這一支**（少呼叫一半就是說謊）。"""
         self._sync_enabled()
         self._fill_answer()
+        self._mark_every_kth()
         self._draw()
         self._fill_stack()
         self._fill_try()
@@ -1572,9 +1603,12 @@ class PitchHelperWindow(QMainWindow):
         self._try_buttons = []
         flags = self._flags()
         h, w = (self._work.shape[:2] if self._work is not None else (0, 0))
+        hint = self._every_kth()
         cands = (candidate_periods(self._m, flags,
                                    effective_period(self._m, self.override()),
-                                   limit=(w / 2.0, h / 2.0))
+                                   limit=(w / 2.0, h / 2.0),
+                                   prefer=(self._every_kth_period(hint)
+                                           if hint is not None else None))
                  if self._m is not None else [])
         self.lab_try.setVisible(bool(cands))
         # ⚠ **只放得下幾顆就放幾顆**（2026-09-24）。候選多了 ×3 之後，小數週期的
@@ -1640,7 +1674,8 @@ class PitchHelperWindow(QMainWindow):
             "<br>Each row is one of the three ways it looks for a repeat; the "
             "number in brackets is that method's own confidence. They are "
             "allowed to disagree — that is a fact about the layout, not a "
-            "fault.%s%s" % (cells, self._decided_note(), self._noise_note()))
+            "fault.%s%s%s" % (cells, self._decided_note(), self._noise_note(),
+                              self._every_kth_details()))
 
     def _doubts(self) -> List[str]:
         """引擎的話裡**讓答案可疑**的那幾句（`MeasuredPeriod.doubts`）。
@@ -1686,6 +1721,99 @@ class PitchHelperWindow(QMainWindow):
                    float(getattr(gc, "agreement_raw", 0.0) or 0.0),
                    " Too much to take out reliably." if is_too_noisy(gc)
                    else ""))
+
+    # -- 每隔 k 格不一樣（2026-09-30）------------------------------------------
+    def _every_kth(self) -> Optional[Tuple[int, int, float, float]]:
+        """``(軸, k, relevance, significance)`` 或 None —— **只有這一支**判斷該不該講。
+
+        狀態行、證據卡、×2 的標記、警告、候選、Details 六個地方都問它：各自
+        判斷的話，總有一個地方會在按了 ×2、新的疊圖還沒回來的那一刻講舊的事
+        （`every_kth_hint` 的說明）。
+        """
+        if self._m is None or self._gc is None or self._work is None:
+            return None
+        flags = self._flags()
+        ex, ey = effective_period(self._m, self.override())
+        return every_kth_hint(self._gc, lattice_periods(
+            self._work.shape[:2], ex, ey, flags))
+
+    def _every_kth_period(self, hint: Tuple[int, int, float, float]
+                          ) -> Tuple[float, float]:
+        """那一軸 × k 之後的那一組週期（「真的單元」的建議）。"""
+        return scaled_period(effective_period(self._m, self.override()),
+                             hint[0], float(hint[1]))
+
+    def _every_kth_details(self) -> str:
+        hint = self._every_kth()
+        return "" if hint is None else "<br><br>" + html.escape(every_kth_note(*hint))
+
+    def _mark_every_kth(self) -> None:
+        """那一軸的 ×2 **框起來**（k = 2 的時候）—— 警告叫人按的就是它。
+
+        ⚠ 不是換顏色、不是換字：框是 hairline ＋ warning 色，跟那條警告同一個
+        色調（兩個通道：框 ＋ 警告那一句的「press ×2 on the X row」）。
+        """
+        hint = self._every_kth()
+        for i, b in enumerate(self._double_buttons):
+            on = hint is not None and hint[0] == i and hint[1] == 2
+            if bool(b.property("suggested")) == on:
+                continue
+            b.setProperty("suggested", on)
+            b.setStyleSheet(b.property("baseStyle") + (
+                "border:%s solid %s;border-radius:%s;"
+                % (TOKENS["hairline"], TOKENS["warning"], TOKENS["radius_sm"])
+                if on else ""))
+            b.setToolTip(("Suggested: every other cell along %s differs. "
+                          % "XY"[i] if on else "") + b.property("baseTip"))
+
+    def _every_kth_dialog(self) -> Optional[Any]:
+        """“Compare them ›” 打開的那一個對話框（不 ``exec``，測試才建得出來）。
+
+        光講「每隔一格不一樣」是要人相信一個數字；**兩類各疊一張並排**，再加
+        一張「差在哪裡」，他自己看得出來（同 `show_cell_big`：看得出來是它存在
+        的理由）。``Use …`` ＝ 那一軸 × k（跟按 ×2 同一支）。
+        """
+        hint = self._every_kth()
+        if hint is None:
+            return None
+        axis, k = hint[0], hint[1]
+        flags = self._flags()
+        ex, ey = effective_period(self._m, self.override())
+        ux, uy = lattice_periods(self._work.shape[:2], ex, ey, flags)
+        stacks = algo_template.every_kth_stacks(
+            self._work, ux, uy, self._gc.origin, flags, axis, k)
+        if not stacks:
+            return None
+        from PySide6.QtWidgets import QDialog, QDialogButtonBox
+        dlg = QDialog(self)
+        dlg.setWindowTitle(every_kth_title(axis, k))
+        fit_screen.fit(dlg, 720, 520)
+        lay = QVBoxLayout(dlg)
+        view = ImageView(dlg)
+        view.set_image(compare_strip(stacks))
+        lay.addWidget(view, 1)
+        cap = QLabel(every_kth_caption(k), dlg)
+        cap.setObjectName("paramHint")
+        cap.setWordWrap(True)
+        lay.addWidget(cap)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Close,
+                              Qt.Horizontal, dlg)
+        bb.button(QDialogButtonBox.Ok).setText(
+            "Use %s" % candidate_label(*self._every_kth_period(hint), flags))
+        mark_primary(bb)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        lay.addWidget(bb)
+        dlg.accepted.connect(lambda: self._scale_axis(axis, float(k)))
+        apply_button_cursors(dlg)
+        return dlg
+
+    def show_every_kth(self) -> None:
+        dlg = self._every_kth_dialog()
+        if dlg is not None:
+            # 每按一次 “Compare them” 就建一個；關掉就收，不要一直掛在視窗底下。
+            dlg.setAttribute(Qt.WA_DeleteOnClose)
+            dlg.exec()
 
     def _on_details(self, on: bool) -> None:
         self.btn_details.setText(("▾  Details" if on else "▸  Details"))
@@ -1836,7 +1964,21 @@ class PitchHelperWindow(QMainWindow):
         else:
             word = "did not agree. Wrong period, or the image is rotated."
         edge = ", edges left out" if getattr(gc, "trimmed", False) else ""
-        self.lab_stack.setText("%d cells%s — %s" % (n, edge, word))
+        hint = self._every_kth()
+        if hint is None:
+            self.lab_stack.setText("%d cells%s — %s" % (n, edge, word))
+            return
+        # ⚠ **「每隔一格不一樣」的時候，「landed on each other」是一句誤導的
+        # 真話**（2026-09-30）：格子確實疊得很齊 —— 因為多出來的那一點被平均成
+        # 一半的亮度。所以疊得齊的時候換掉那一句；疊不齊的時候那一句比較要緊，
+        # 留著。連結打開兩類各疊一張的對照（`show_every_kth`）。
+        if tone == TONE_GOOD:
+            word = every_kth_card(hint[0], hint[1])
+        self.lab_stack.setText(
+            "%s <a href=\"compare\" style=\"color:%s;text-decoration:none;\">"
+            "<b>Compare them ›</b></a>"
+            % (html.escape("%d cells%s — %s" % (n, edge, word)),
+               TOKENS["accent"]))
 
     def _fill_warning(self) -> None:
         """⚠ **只在有事的時候出現。** 第一版有一塊常駐的「What it decided」，
@@ -1860,6 +2002,12 @@ class PitchHelperWindow(QMainWindow):
                 # 沒有關係。哪幾句算疑點是量出來的（`template._SELF_CORRECTIONS`）；
                 # 其他那幾句收進 Details 的「What it decided」。
                 lines.extend(self._doubts())
+            hint = self._every_kth()
+            if hint is not None:
+                # 最前面：它是這一條裡唯一一句「按哪裡」講得出來的。
+                lines.insert(0, every_kth_warning(
+                    hint[0], hint[1], self._every_kth_period(hint),
+                    self._flags()))
             note = ""
             if self._gc is not None and not nothing and self._work is not None:
                 ex, ey = effective_period(self._m, self.override())
@@ -1934,6 +2082,11 @@ class PitchHelperWindow(QMainWindow):
             return TONE_WARN, VERDICT_NOISY
         if tone != TONE_GOOD:
             return tone, VERDICT_BLURRED
+        # ⚠ **排在「Using your period」前面**（2026-09-30）：打進去的那個數字
+        # 也可能是每隔一格不一樣的那一半，而那句中性的話會蓋掉唯一的提醒。
+        hint = self._every_kth()
+        if hint is not None:
+            return TONE_WARN, VERDICT_EVERY_KTH.get(hint[1], VERDICT_CHECK)
         if any(self.override()):
             return "busy", VERDICT_TYPED
         return (TONE_WARN, VERDICT_CHECK) if self._has_warning \
