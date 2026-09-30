@@ -39,7 +39,7 @@ Inspection 的 ADC 工具）裡的一個小工具，2026-09-23 由 `tools/extrac
 ```bash
 pip install -r requirements.txt && pip install pytest ruff==0.15.8
 ruff check                                        # 幾秒，先跑這個
-QT_QPA_PLATFORM=offscreen python -m pytest -q     # 141 條（Windows 不用設）
+QT_QPA_PLATFORM=offscreen python -m pytest -q     # 328 條（Windows 不用設）
 ```
 
 ⚠ **動版面之前先讀 [`docs/F120-pitch-helper.md`](docs/F120-pitch-helper.md)**
@@ -55,6 +55,26 @@ QT_QPA_PLATFORM=offscreen python -m pytest -q     # 141 條（Windows 不用設�
 * 會跳 modal 對話框的東西要有一個關得掉的旗標，否則 headless 測試會永遠停在那裡
 * 不要寫死視窗尺寸，用 `ui/fit_screen.fit()`
 * **同一件事只寫在一個地方** —— 抄出來的第二份一定會漂
+
+## 打包成 exe（Windows）
+
+雙擊 repo 根的 **`build_exe.bat`**，做完就是 `dist\PitchHelper.exe` —— 一個
+檔案，拿到沒有裝 Python 的電腦上也能直接開。
+
+* 它會找 Python 3.9+、建一個專用的 `.venv-build\`、裝 `requirements.txt` +
+  PyInstaller，再叫 `tools/build_exe.py` 打包。**第一次要能上網**（下載套件），
+  之後重打就用已經裝好的那些。打一次幾分鐘。
+* `build_exe.bat --onedir` —— 打成一個資料夾（`dist\PitchHelper\`）。開得比較快
+  （單一 exe 每次開都要先解壓到暫存資料夾），但要**整個資料夾**一起搬。單一 exe
+  被防毒軟體擋下來的時候（PyInstaller 的通病）也改用這個。
+* `build_exe.bat --console` —— 多一個黑色主控台視窗。exe 開不起來或閃退的時候
+  用這個重打一次，錯誤訊息會留在那個視窗裡。
+* 不能上網、但手上的 Python 已經裝好 PyInstaller 與相依套件：直接
+  `python tools\build_exe.py`（一樣吃 `--onedir`／`--console`）。
+
+⚠ `build_exe.bat` 要維持**純 ASCII、不用 label／goto** —— cmd.exe 用主控台的
+code page（cp950）讀它，而這個 repo 的檔案一律是 LF 換行。理由與守門的測試在
+`tests/test_build_exe.py`；打包的設定全部在 `tools/build_exe.py`，不在 .bat 裡。
 
 ## 拿不到 git 的機器（廠內）
 

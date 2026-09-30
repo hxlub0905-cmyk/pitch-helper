@@ -1824,20 +1824,40 @@ def _cards(win):
 
 
 def test_the_column_reads_picture_then_answer_then_settings(win, ph, app):
-    """使用者的順序，而理由是他給的：**要先確認 GC 跟 pitch 是不是正確的。**"""
+    """使用者的順序，而理由是他給的：**要先確認 GC 跟 pitch 是不是正確的。**
+
+    ⚠ 2026-09-30 起第三張平常收起來（剪髮，見 `_answer_side`）：收起來的時候
+    那個位置是它的開關，打開之後卡就在開關正下方。守的事沒變 —— 圖、答案、
+    然後才是設定，而且每一個區塊都有名字。
+    """
     img = tiles(px=60, py=44)
     win.set_image(img, "a.tif")
     win._on_done(*_run(win, img), "")
     win.resize(1180, 780)
     win.show()
     app.processEvents()
+    side = win.split.widget(1)
+
+    def top(w):
+        return w.mapTo(side, w.rect().topLeft()).y()
+
+    cards = _cards(win)
+    assert cards == [win.cell_view.parentWidget(), win.lab_big.parentWidget()], (
+        "乾淨的答案：修正區收著", [c.title() for c in cards])
+    assert top(cards[0]) < top(cards[1]) < top(win.btn_fix)
+
+    win.btn_fix.click()
+    app.processEvents()
     cards = _cards(win)
     assert len(cards) == 3, [c.title() for c in cards]
     assert cards[0] is win.cell_view.parentWidget(), "第一張要是那張圖"
     assert cards[1] is win.lab_big.parentWidget(), "第二張要是答案"
     assert cards[2] is win.chips_axis.parentWidget(), "第三張才是設定"
-    # 每一張都要有名字 —— 一張沒有標題的卡等於一個沒有人介紹的區塊。
-    assert all(c.title().strip() for c in cards), [c.title() for c in cards]
+    assert top(cards[1]) < top(win.btn_fix) < top(cards[2]), "開關是那張卡的標題"
+    # 每一個區塊都要有名字 —— 一張沒有標題的卡等於一個沒有人介紹的區塊。
+    # 第三張的名字寫在打開它的那一行上（兩個都寫的話同一句話會連著出現兩次）。
+    assert all(c.title().strip() for c in cards[:2]), [c.title() for c in cards]
+    assert win.FIX_TITLE in win.btn_fix.text()
 
 
 def test_the_stacking_settings_are_not_evidence(win, ph):
@@ -1917,11 +1937,22 @@ def test_the_right_column_fits_a_768_laptop(win, ph, app):
     win.resize(1180, 780)
     win.show()
     app.processEvents()
+    folded = win.answer_side.sizeHint().height()
+    # ⚠ **量打開的那一種**（2026-09-30 起修正區平常收著）：這一條守的正是
+    # 「發現不對、要改」的那個畫面，而那一刻修正區是打開的（`_auto_fix`）。
+    # 量收起來的那一種的話，它永遠會過，而且什麼都沒守到。
+    win.btn_fix.click()
+    # ⚠ 顯示／隱藏之後版面是**下一輪**才重算的：馬上量會拿到舊的快取
+    # （實測 688，重算完是 614）。
+    for _ in range(3):
+        app.processEvents()
+    win.answer_side.layout().activate()
     # ⚠ 量的是右欄的**內容**（`answer_side`），不是 `split.widget(1)`：後者從
     # 2026-09-24 起是包著它的捲軸，而捲軸的 sizeHint 是 Qt 的預設值，量不到
     # 任何東西。捲軸是給 Details 打開時用的 —— 平常仍然要放得下。
     want = win.answer_side.sizeHint().height()
     assert want <= 700, ("右欄長太高了，768 的筆電上要捲", want)
+    assert folded < want, ("收起來要真的比較短", folded, want)
 
 
 # --------------------------------------------------------------------------- #
@@ -2366,3 +2397,166 @@ def test_halving_stops_where_a_period_would_stop(win, ph):
     assert win._half_buttons[1].isEnabled()
     win._on_halve(0)
     assert win.override() == (None, None)
+
+
+# --------------------------------------------------------------------------- #
+# 16. 剪髮：修正區平常收起來，有事自己打開（2026-09-30，使用者：「我感覺 UI
+#     要做剪髮…for user 最初的目的，應該就是要把圖丟進去得到答案」）
+# --------------------------------------------------------------------------- #
+def test_a_clean_answer_shows_only_the_picture_the_answer_and_copy(win, ph):
+    """乾淨的答案：**證據與答案都在，修正工具收著**。
+
+    ⚠ 收的只有修正工具。疊出來那一格、Cells agree、格線、兩軸的信心 ——
+    那些是「憑什麼相信它」，§5／§12.1 講過：要人去找的驗證等於沒有驗證。
+    """
+    img = tiles(px=60, py=44)
+    win.set_image(img, "a.tif")
+    win._on_done(*_run(win, img), "")
+    assert win.verdict() == (ph.TONE_GOOD, ph.VERDICT_OK)
+    assert not win._fix_open and win.fix_card.isHidden()
+    assert all(b.isHidden() for b in win._double_buttons + win._half_buttons), (
+        "×½／×2 是修正工具，跟著收")
+    for w in (win.cell_view, win.bar_agree, win.lab_big, win._bars[0],
+              win._bars[1], win.spin_nm, *win._copy_buttons):
+        assert not w.isHidden(), type(w).__name__
+    assert win.view.overlay_count() > 0, "格線照樣畫在圖上"
+    assert not win.btn_fix.isHidden() and win.btn_fix.isEnabled()
+
+
+def test_the_fold_switch_is_a_clickable_title_not_another_box(win, ph):
+    """它是一張卡的標題、同時點得下去 —— **不是第六顆有框的鈕**。"""
+    assert win.btn_fix.property("variant") == "ghost"
+    assert win.btn_fix.property("clickableText") == "true"
+    assert win.FIX_TITLE in win.btn_fix.text()
+    assert win.btn_fix.text().startswith("▸"), "收著的時候箭頭朝右"
+    win.set_image(tiles(px=60, py=44), "a.tif")
+    win.btn_fix.click()
+    assert win._fix_open and win.btn_fix.text().startswith("▾")
+
+
+def test_the_fold_switch_is_grey_on_the_empty_screen(win, ph):
+    """同 §26.3 那一條：沒有圖的時候，按了什麼都不會發生的東西要是灰的。"""
+    assert not win.btn_fix.isEnabled()
+    win.set_image(tiles(px=60, py=44), "a.tif")
+    assert win.btn_fix.isEnabled()
+
+
+def test_a_doubtful_answer_opens_the_fixes_by_itself(win, ph):
+    """狀態行一變黃／紅，修正區**自己打開** —— 那一刻使用者要的正是它。"""
+    from pitchapp.core.algo import template as algo_template
+
+    flat = np.full((400, 500), 128, np.uint8)
+    win.set_image(flat, "flat.png")
+    assert not win._fix_open, "還在量的時候不打開（還沒有話要說）"
+    win._on_done(algo_template.measure_period(flat), None, "")
+    assert win.verdict() == (ph.TONE_BAD, ph.VERDICT_NONE)
+    assert win._fix_open and not win.fix_card.isHidden()
+
+
+def test_a_changed_setting_never_hides_behind_the_fold(win, ph):
+    """⚠ **收起來的地方不准藏著一個改過的設定。** X only、Ignore defects、
+    沒跳過邊界 —— 它們改了答案或疊圖，收起來的話畫面上看不出它們開著。
+    換一張新圖也一樣（設定撐得過換圖）。"""
+    img = tiles(px=60, py=44)
+    for change, undo in (
+            (lambda: win.chips_axis.set_text(ph.AXIS_X),
+             lambda: win.chips_axis.set_text(ph.AXIS_BOTH)),
+            (lambda: win.chk_median.setChecked(True),
+             lambda: win.chk_median.setChecked(False)),
+            (lambda: win.chk_edges.setChecked(False),
+             lambda: win.chk_edges.setChecked(True))):
+        win.set_image(img, "a.tif")
+        win._on_done(*_run(win, img), "")
+        assert not win._fix_open
+        change()
+        win._refresh()
+        assert win._fix_open
+        win.set_image(img, "b.tif")
+        assert win._fix_open, "新圖也要看得到那個改過的設定"
+        undo()
+        win.set_image(img, "c.tif")
+        win._on_done(*_run(win, img), "")
+        assert not win._fix_open, "設定改回去了，乾淨的答案就收著"
+
+
+def test_the_fold_never_closes_by_itself(win, ph):
+    """⚠ **只會自己打開，不會自己收起來。** 使用者按 ×2、再按 Reset，答案變回
+    綠勾 —— 那一刻整張卡要是從他游標底下消失，就是在跟他搶。"""
+    img = tiles(px=60, py=44)
+    win.set_image(img, "a.tif")
+    win._on_done(*_run(win, img), "")
+    win.btn_fix.click()
+    win._on_double(0)
+    assert win._fix_open
+    win._on_reset()
+    win._on_done(*_run(win, img), "")
+    assert win.verdict() == (ph.TONE_GOOD, ph.VERDICT_OK)
+    assert win._fix_open, "答案變綠了，但使用者還在裡面"
+
+
+def test_a_new_image_starts_folded(win, ph):
+    """換一張圖從頭來過：上一張打開的修正區不跟過來。"""
+    img = tiles(px=60, py=44)
+    win.set_image(img, "a.tif")
+    win.btn_fix.click()
+    assert win._fix_open
+    win.set_image(img, "b.tif")
+    assert not win._fix_open
+    win._on_done(*_run(win, img), "")
+    assert not win._fix_open
+
+
+def test_closing_it_yourself_holds_until_something_new_comes_up(win, ph):
+    """使用者自己收起來之後，**同一句狀態底下**不再打開（不然每次重畫都會把
+    他剛收起來的東西又打開）；狀態換了一句 —— 多了一件新的事 —— 才重新算。"""
+    img = tiles(px=60, py=44)
+    win.set_image(img, "a.tif")
+    m = _run(win, img)[0]
+    win._set_override(120.0, 0.0)            # 自己打的週期：打開
+    win._on_done(m, stacked(img, 120, 44), "")
+    assert win.verdict()[1] == ph.VERDICT_TYPED
+    assert win._fix_open
+    win.btn_fix.click()                      # 他自己收起來
+    assert not win._fix_open
+    win._refresh()
+    assert not win._fix_open, "同一句狀態，不准自己又打開"
+    win._set_override(37.0, 29.0)            # 一個對不起來的週期：狀態變紅
+    win._on_done(m, stacked(img, 37, 29), "")
+    assert win.verdict() == (ph.TONE_BAD, ph.VERDICT_BLURRED)
+    assert win._fix_open, "新的疑點要讓他看到"
+
+
+def test_opening_details_opens_the_fold_it_lives_in(win, ph):
+    """Details 住在修正區裡：要它打開，修正區就得是打開的。"""
+    _ready(win)
+    assert not win._fix_open
+    win.btn_details.setChecked(True)
+    assert win._fix_open and win.details.isVisibleTo(win)
+
+
+def test_a_greyed_out_link_button_stops_looking_clickable(app, ph):
+    """⚠ **量的是畫出來的顏色，不是我們設了什麼**（同上面那條答案字級）。
+
+    accent 字的 ghost 鈕（修正區的開關、×½／×2、候選）在 QSS 裡本來沒有
+    `:disabled` —— 於是空畫面上那顆灰掉的開關**照樣是藍字**，看起來按得下去
+    （§26.3：按了不會發生任何事的東西要是灰的）。
+    """
+    import numpy as np
+    from pitchapp.ui import theme
+    theme.apply_theme(app)
+    win = ph.PitchHelperWindow()
+    try:
+        win.resize(1180, 780)
+        win.show()
+        app.processEvents()
+        assert not win.btn_fix.isEnabled()
+        img = win.btn_fix.grab().toImage()
+        accent = theme.TOKENS["accent_active"].lstrip("#")
+        want = np.array([int(accent[i:i + 2], 16) for i in (0, 2, 4)])
+        px = [img.pixelColor(x, y) for x in range(img.width())
+              for y in range(img.height())]
+        near = [c for c in px if np.abs(np.array([c.red(), c.green(), c.blue()])
+                                        - want).max() < 40]
+        assert not near, ("灰掉的開關還是 accent 藍", len(near))
+    finally:
+        win.close()

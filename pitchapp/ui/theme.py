@@ -910,6 +910,12 @@ QPushButton[variant="ghost"][clickableText="true"] {
 QPushButton[variant="ghost"][clickableText="true"]:hover {
     background: $accent_bg; color: $accent_active;
 }
+/* ...and when it cannot be clicked, it must stop saying it can: the accent
+   text above has no :disabled of its own, so a greyed-out one stayed blue
+   (the fold switch on the empty screen, a x1/2 that would go under 2 px). */
+QPushButton[variant="ghost"][clickableText="true"]:disabled {
+    color: $text_disabled;
+}
 /* The pixel size is a footnote on the answer, not an action: flat, quiet, and
    it stops looking like a peer of the Copy button sitting under it. */
 QDoubleSpinBox#pitchPixelSize {

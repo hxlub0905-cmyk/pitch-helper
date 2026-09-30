@@ -184,3 +184,15 @@ def test_the_worker_fills_it_in(ph):
     alts = got[-1].every_kth
     assert [(a.axis, a.k) for a in alts if a.flagged] == [("x", 2)]
     assert np.isfinite([a.relevance for a in alts]).all()
+
+
+def test_the_x2_the_warning_points_at_is_on_screen(win, ph):
+    """警告說「press ×2 on the X row」—— 那一顆就要**看得到**。
+
+    ×½／×2 平常跟修正區一起收著（2026-09-30 剪髮）；這一句一出現，狀態行是
+    黃的，修正區自己打開，那一顆 ×2 連同它的框一起回到畫面上。
+    """
+    shown(win, ph)
+    assert win._fix_open
+    assert not win._double_buttons[0].isHidden()
+    assert bool(win._double_buttons[0].property("suggested"))
