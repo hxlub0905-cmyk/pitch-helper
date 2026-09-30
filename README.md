@@ -39,7 +39,7 @@ Inspection 的 ADC 工具）裡的一個小工具，2026-09-23 由 `tools/extrac
 ```bash
 pip install -r requirements.txt && pip install pytest ruff==0.15.8
 ruff check                                        # 幾秒，先跑這個
-QT_QPA_PLATFORM=offscreen python -m pytest -q     # 317 條（Windows 不用設）
+QT_QPA_PLATFORM=offscreen python -m pytest -q     # 328 條（Windows 不用設）
 ```
 
 ⚠ **動版面之前先讀 [`docs/F120-pitch-helper.md`](docs/F120-pitch-helper.md)**

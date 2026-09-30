@@ -446,6 +446,9 @@ class PitchHelperWindow(QMainWindow):
       幹嘛？」。沒有話要說的時候整條不佔位置。
     * **每一個分數都配一條橫條**（綠／黃／紅），數字照樣在（U13：顏色不是
       唯一的通道）。
+    * **修正工具只在需要的時候打開**（2026-09-30 剪髮）：「Not the cell you
+      want?」平常收成一行，答案要人看一眼、或有改過的設定時自己打開
+      （`_auto_fix`）。證據不收 —— 見 `_answer_side`。
     """
 
     #: 量完一次：(MeasuredPeriod, GoldenCell 或 None)。
@@ -486,6 +489,12 @@ class PitchHelperWindow(QMainWindow):
         self._measured: Optional[Tuple[str, float]] = None
         #: `_fill_warning` 這一輪有沒有話要說 —— 狀態行的判準（見 `verdict`）。
         self._has_warning = False
+        #: 「Not the cell you want?」那一區現在是不是打開的（見 `_set_fix_open`）。
+        self._fix_open = False
+        #: 使用者**自己收起來**的那一刻，狀態行寫的是哪一句；``None`` ＝ 沒收過。
+        #: 同一句話底下不再自己打開（不跟使用者搶），換了一句話才重新算
+        #: （見 `_auto_fix`）。
+        self._fix_dismissed: Optional[str] = None
 
         root = QWidget(self)
         self.setCentralWidget(root)
@@ -775,6 +784,17 @@ class PitchHelperWindow(QMainWindow):
 
         高度是量出來的：這個排法 664 px，而 1366×768 的筆電上右欄約 700。
         圖獨佔一塊的原版是 742（會被切），並排版是 595。
+
+        ⚠ **卡 3 平常收起來**（2026-09-30，使用者：「我感覺 UI 要做剪髮，或者是
+        分簡單模式跟進階模式（for user 最初的目的，應該就是要把圖丟進去得到
+        答案）」）。收起來的時候只剩一行「▸ Not the cell you want?」；答案要人
+        看一眼、或有一個改過的設定時它**自己打開**（`_auto_fix`）。
+
+        為什麼不是「簡單／進階」兩個模式（使用者看過兩個方案之後選的）：
+        **證據不准藏**（§5／§12.1：「要人去找的驗證等於沒有驗證」），所以兩個
+        模式唯一的差別只會是修正工具 —— 而一個模式開關是多一個要學的東西，
+        停在「簡單」的人碰到錯的答案不會知道要去切。收起來＋有事自己打開，
+        跟 `Details` 預設收起來、警告條只在有事時出現是同一條規矩。
         """
         box = QWidget(self)
         # ⚠ **這個寬度是量出來的，不是挑的。** 340 的時候：四顆膠囊擠成兩排、
@@ -788,8 +808,16 @@ class PitchHelperWindow(QMainWindow):
         lay.addWidget(self._header_row(box))
         lay.addWidget(self._proof_card(box))
         lay.addWidget(self._period_card(box))
-        lay.addWidget(self._fix_card(box))
+        # 開關緊貼著它打開的那張卡（2 px，不是卡與卡之間的 8）：它**就是**那張
+        # 卡的標題，隔開了會讀成兩件事。
+        fix = QVBoxLayout()
+        fix.setSpacing(2)
+        fix.addWidget(self._fix_toggle(box))
+        self.fix_card = self._fix_card(box)
+        fix.addWidget(self.fix_card)
+        lay.addLayout(fix)
         lay.addStretch(1)
+        self._set_fix_open(False)
         return box
 
     def _header_row(self, parent: QWidget) -> QWidget:
@@ -1027,14 +1055,49 @@ class PitchHelperWindow(QMainWindow):
         b.setToolTip(tip)
         return b
 
+    #: 卡 3 的名字 —— 寫在打開它的那一行上（見 `_fix_toggle`）。
+    FIX_TITLE = "Not the cell you want?"
+
+    def _fix_toggle(self, parent: QWidget) -> QPushButton:
+        """「▸ Not the cell you want?」—— 卡 3 的標題，**同時**是打開它的鈕。
+
+        ⚠ **長得像一個點得下去的標題，不是一顆有框的鈕**：ghost ＋ accent 字
+        （同 `Or try` 的候選）。有框的鈕在這個 app 是「這是動作」，上限五顆
+        （`test_only_the_real_actions_get_a_box`）；而一行看起來點不下去的字，
+        跟一顆不存在的鈕是同一回事（§21）。
+        ⚠ **矮的**（不是按鈕的 34 px，同 ×½／×2 那一排的做法）：它頂替的是那張
+        卡原本的標題列，而 1366×768 的筆電上右欄只有約 700 px。量出來打開時
+        右欄只比改之前多 8 px（606 → 614，offscreen、DejaVu）。
+        """
+        b = QPushButton(self.FIX_TITLE, parent)
+        b.setProperty("variant", "ghost")
+        b.setProperty("clickableText", "true")
+        b.setCheckable(True)
+        b.setStyleSheet("text-align:left;min-height:0px;padding:2px 4px;")
+        b.setToolTip(
+            "The axis, a period of your own, the other sizes it could be "
+            "(×½, ×2, Or try), how the cells are stacked, and the details. "
+            "Opens by itself when the answer needs a second look.")
+        # `clicked`，不是 `toggled`：只有**使用者按的**才算數（`_on_fix_clicked`
+        # 要記住他收起來過）；程式自己打開的時候走 `setChecked`，不經過這裡。
+        b.clicked.connect(self._on_fix_clicked)
+        self.btn_fix = b
+        return b
+
     def _fix_card(self, parent: QWidget) -> QWidget:
         """不對的話怎麼改 —— 軸向、覆寫、候選，以及**怎麼疊**。
 
         ⚠ `Ignore defects` / `Skip edge cells` 住在這裡而不是證據卡裡：它們改
         的是「下一次怎麼疊」，是設定不是證據。它們本來擠在證據卡的右下角，
         而那讓那張卡左右兩半高度對不起來。
+
+        ⚠ **這張卡沒有自己的標題**：它的名字寫在正上方那一行開關上
+        （`_fix_toggle`）。兩個都寫的話同一句話會連著出現兩次。theme 替每張卡
+        的標題留了 16 px 的 `margin-top`，沒有標題就把它拿掉 —— 不然開關底下
+        會多一截空白，右欄也白白長高 16 px。
         """
-        card = QGroupBox("Not the cell you want?", parent)
+        card = QGroupBox("", parent)
+        card.setStyleSheet("QGroupBox { margin-top: 0px; }")
         lay = QVBoxLayout(card)
         lay.setContentsMargins(4, 4, 4, 4)
         lay.setSpacing(6)
@@ -1191,6 +1254,10 @@ class PitchHelperWindow(QMainWindow):
         self._crop = None
         self._name = str(name or "")
         self._m = self._gc = None
+        # 新的一張圖從頭來過：修正區收起來，等這張圖的答案出來再決定要不要
+        # 打開（`_auto_fix`）。改過的設定會讓它當場又打開 —— 那是對的。
+        self._fix_dismissed = None
+        self._set_fix_open(False)
         self._apply_crop()
         if ask_crop and not self.ask_crop():
             self.remeasure()
@@ -1357,6 +1424,10 @@ class PitchHelperWindow(QMainWindow):
         has = self._work is not None and bool(np.asarray(self._work).size)
         for w in self._needs_image():
             w.setEnabled(has)
+        # ⚠ 修正區的開關**不在** `_needs_image` 裡：那一組在量的時候也會被
+        # `_busy` 關掉，而這一顆只負責「看得到／看不到」—— 每次重疊都讓那一行
+        # 灰一下再亮回來，是一個沒有意思的閃爍。沒有圖的時候照樣是灰的。
+        self.btn_fix.setEnabled(has)
         for i, b in enumerate(self._double_buttons):   # 要有一個量到的數字才翻得了倍
             b.setEnabled(has and self._scaled(i, 2.0) is not None)
         for i, b in enumerate(self._half_buttons):     # 折半之後要還是一個週期
@@ -1565,9 +1636,11 @@ class PitchHelperWindow(QMainWindow):
                              self.key_for("copy_focused_or_answer" if i == 0
                                           else "copy_y")))
                          if num else "Nothing measured yet.")
+        # ×½／×2 另外算：它們還要看修正區開著沒有（`_sync_step_buttons`）。
+        self._sync_step_buttons()
         for i, (bar, tag) in enumerate(zip(self._bars, self._tags)):
             show = flags[i] if self._m is not None else True
-            for w in (tag, bar, self._double_buttons[i], self._half_buttons[i]):
+            for w in (tag, bar):
                 w.setVisible(show)
             if not show:
                 continue
@@ -1815,9 +1888,71 @@ class PitchHelperWindow(QMainWindow):
             dlg.setAttribute(Qt.WA_DeleteOnClose)
             dlg.exec()
 
+    # -- 卡 3 收起來／打開（2026-09-30 剪髮）-----------------------------------
+    def _set_fix_open(self, on: bool) -> None:
+        """打開或收起「Not the cell you want?」—— **只有這一支動它**。
+
+        收起來的不只是那張卡：答案那兩列末端的 ×½／×2 也是修正工具（它們的
+        說明寫著「它是一個備案，不是主要動作」），跟著一起收。
+        """
+        self._fix_open = bool(on)
+        self.btn_fix.setChecked(self._fix_open)
+        self.btn_fix.setText(("▾  " if self._fix_open else "▸  ") + self.FIX_TITLE)
+        self.fix_card.setVisible(self._fix_open)
+        self._sync_step_buttons()
+
+    def _on_fix_clicked(self, on: bool) -> None:
+        """使用者自己按的。收起來的話**記住那一刻狀態行寫什麼**（`_auto_fix`）。"""
+        self._fix_dismissed = None if on else self.verdict()[1]
+        self._set_fix_open(on)
+
+    def _wants_fix(self) -> bool:
+        """修正區該不該自己打開 —— **答案要人看一眼，或者有一個改過的設定**。
+
+        * 狀態行是黃或紅（疊不起來、找不到週期、每隔一格不一樣、雜訊太大、
+          信心太低……）：那一刻使用者要的正是這張卡，而警告條叫他按的 ×2
+          就收在裡面。
+        * **收起來的地方不准藏著一個改過的設定。** X only、Ignore defects、
+          沒跳過邊界、自己打的週期 —— 它們改了答案或疊圖，而收起來的話
+          畫面上沒有任何地方看得到它們是開著的。
+        """
+        if self.axis() != AXIS_BOTH or self.chk_median.isChecked() \
+                or not self.chk_edges.isChecked() or any(self.override()):
+            return True
+        tone, text = self.verdict()
+        return bool(text) and tone in (TONE_WARN, TONE_BAD)
+
+    def _auto_fix(self) -> None:
+        """有事就自己打開；**從來不自己收起來**。
+
+        ⚠ 不自己收：使用者正在裡面按 Reset、候選、×2 的時候，答案一變綠整張卡
+        就從他游標底下消失 —— 那是在跟他搶。收起來只有兩條路：他自己按，或
+        換一張新圖（`set_image`，從頭來過）。
+        ⚠ 他自己收起來之後，**同一句狀態底下**不再打開；狀態換了一句（多了一個
+        新的疑點）才重新算 —— 不然每次重畫都會把他剛收起來的東西又打開。
+        """
+        if self._fix_open or not self._wants_fix():
+            return
+        if self._fix_dismissed is not None \
+                and self.verdict()[1] == self._fix_dismissed:
+            return
+        self._set_fix_open(True)
+
+    def _sync_step_buttons(self) -> None:
+        """×½／×2：那一軸在用，**而且**修正區是打開的，才出現。"""
+        flags = self._flags()
+        for i in range(2):
+            show = self._fix_open and (flags[i] if self._m is not None else True)
+            self._double_buttons[i].setVisible(show)
+            self._half_buttons[i].setVisible(show)
+
     def _on_details(self, on: bool) -> None:
         self.btn_details.setText(("▾  Details" if on else "▸  Details"))
         self.details.setVisible(bool(on))
+        if on and not self._fix_open:
+            # Details 住在修正區裡：要看它，修正區就得是打開的。
+            self._fix_dismissed = None
+            self._set_fix_open(True)
         if on:
             # 版面要先長出來才捲得到它 —— 下一輪事件迴圈再捲。
             QTimer.singleShot(0, self._reveal_details)
@@ -2108,6 +2243,8 @@ class PitchHelperWindow(QMainWindow):
         for w in (self.lab_state, self.lab_state_mark):
             w.setStyleSheet("color:%s;" % hexs)
             w.setVisible(bool(text))
+        # 修正區讀的是**同一句**狀態（不另外判斷一次「有沒有事」）。
+        self._auto_fix()
 
     def _say_caption(self, text: str) -> None:
         """圖底下那一行字 —— **只有這一支寫它**。
