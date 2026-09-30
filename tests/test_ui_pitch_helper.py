@@ -450,6 +450,8 @@ def test_the_double_buttons_live_on_their_axis_rows(win, ph):
     win._on_axis(ph.AXIS_X)
     assert win._double_buttons[0].isVisibleTo(win)
     assert not win._double_buttons[1].isVisibleTo(win), "Y 沒在用，Y 的 ×2 也不見"
+    assert win._half_buttons[0].isVisibleTo(win)
+    assert not win._half_buttons[1].isVisibleTo(win), "×½ 跟著同一列"
 
 
 def test_reset_puts_the_measured_period_back(win, ph):
@@ -2322,3 +2324,45 @@ def test_open_details_are_reachable_not_cut_off(win, ph, app):
     for _ in range(5):
         app.processEvents()
     assert area.verticalScrollBar().maximum() == 0
+
+
+
+def test_each_axis_halves_on_its_own(win, ph):
+    """使用者 2026-09-30：「除了 ×2，我感覺也要 ×1/2 的按鈕」—— 量大了的時候
+    （引擎把兩個單元當成一個、或 ×2 按過頭）本來只能自己打數字。"""
+    from pitchapp.core.algo import template as algo_template
+
+    img = tiles(px=60, py=44)
+    win.set_image(img, "synthetic.tif")
+    win._on_done(algo_template.measure_period(img), None, "")
+    win._half_buttons[0].click()                  # 閒著的時候按（按下去會開始重疊）
+    assert [r[1] for r in win.rows()] == ["30", "44"]
+    win._on_halve(1)
+    assert [r[1] for r in win.rows()] == ["30", "22"], "另一軸打過的值要留著"
+
+
+def test_double_then_halve_is_back_to_measured(win, ph):
+    """×2 再 ×½ 要回到「measured」，不是畫面說「X: yours 60 vs measured 60」。"""
+    from pitchapp.core.algo import template as algo_template
+
+    img = tiles(px=60, py=44)
+    win.set_image(img, "synthetic.tif")
+    win._on_done(algo_template.measure_period(img), None, "")
+    win._on_double(0)
+    assert win.override() == (120.0, None)
+    win._on_halve(0)
+    assert win.override() == (None, None)
+    assert "Not the measured size" not in win.warn.text()
+
+
+def test_halving_stops_where_a_period_would_stop(win, ph):
+    """折半之後不成一個週期（< 2 px）的時候，那一顆是灰的，按了也不動。"""
+    img = tiles(px=60, py=44)
+    win.set_image(img, "a.tif")
+    m, gc = _run(win, img)
+    m.px = 3.0
+    win._on_done(m, gc, "")
+    assert not win._half_buttons[0].isEnabled()
+    assert win._half_buttons[1].isEnabled()
+    win._on_halve(0)
+    assert win.override() == (None, None)
