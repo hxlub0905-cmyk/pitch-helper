@@ -881,6 +881,7 @@ class PitchHelperWindow(QMainWindow):
         self.grid_answer.setHorizontalSpacing(8)
         self.grid_answer.setVerticalSpacing(2)
         self._double_buttons: List[QPushButton] = []
+        self._half_buttons: List[QPushButton] = []
         for i, nm in enumerate(("Repeat along X", "Repeat along Y")):
             # 那個軸向標籤本人就是這一行標題：`_fill_answer` 靠
             # `self._tags[i]` 的顯示／隱藏決定「這一軸算不算數」（X only 時
@@ -902,25 +903,26 @@ class PitchHelperWindow(QMainWindow):
             # 20 × 45，真的是 40 × 45；兩軸一起加倍給的是 40 × 90，永遠到不了。
             # 住在這一列是因為那一排在 380 px 寬時已經滿了（Y 那一格跟 ×2 實測
             # 重疊 2 px），而這一列本來就是「這一軸」—— 沒在用的軸整列不見，
-            # 它也跟著不見。長得跟候選一樣（藍字、沒有框）：它是一個備案，不是
-            # 主要動作。
-            dbl = QPushButton("×2", card)
-            dbl.setProperty("variant", "ghost")
-            dbl.setProperty("clickableText", "true")
-            # ⚠ **跟那一列一樣高（bar 的 19 px），不是按鈕的 34。** 一顆一般高度
-            # 的鈕會把兩列各撐高十幾 px，pixel size 那一格就離它換算出來的 µm
-            # 越來越遠（`test_the_pixel_size_sits_with_what_it_converts` 守著）——
-            # 而右欄在 1366×768 上本來就只剩幾十 px。它沒有框，是一行可以點的字。
-            dbl.setFixedHeight(BAR_H + 8)
-            dbl.setStyleSheet("min-height:0px;max-height:%dpx;"
-                              "padding:0px 6px;" % (BAR_H + 8))
-            dbl.setToolTip(
+            # 它也跟著不見。長相與高度見 `_axis_step_button`。
+            # ⚠ **×½ 在 ×2 旁邊**（使用者 2026-09-30：「除了 ×2，我感覺也要
+            # ×1/2 的按鈕」）。量大了的時候（引擎把兩個單元當成一個、或按 ×2
+            # 按過頭）本來只能自己打數字。一樣是一軸一顆、一樣的長相。
+            half = self._axis_step_button(
+                card, "×½",
+                "Halve the %s period only — for when the measured cell holds two "
+                "of your units, or it doubled something it should not have."
+                % ("X" if i == 0 else "Y"))
+            half.clicked.connect(lambda _c=False, k=i: self._on_halve(k))
+            self._half_buttons.append(half)
+            self.grid_answer.addWidget(half, i, 2)
+            dbl = self._axis_step_button(
+                card, "×2",
                 "Double the %s period only — for when one cell of yours is two "
                 "of these repeats (a contact on every other line, two MG lines "
                 "making the unit you compare)." % ("X" if i == 0 else "Y"))
             dbl.clicked.connect(lambda _c=False, k=i: self._on_double(k))
             self._double_buttons.append(dbl)
-            self.grid_answer.addWidget(dbl, i, 2)
+            self.grid_answer.addWidget(dbl, i, 3)
         self.grid_answer.setColumnStretch(1, 1)
         lay.addLayout(self.grid_answer)
         # ---- pixel size ＋ 把答案帶走 ---------------------------------------
@@ -976,6 +978,24 @@ class PitchHelperWindow(QMainWindow):
         self.lab_next.setVisible(False)
         lay.addWidget(self.lab_next)
         return card
+
+    def _axis_step_button(self, card: QWidget, text: str, tip: str) -> QPushButton:
+        """「Repeat along X／Y」那一列末端的小鈕（×½、×2）。
+
+        長得跟候選一樣（藍字、沒有框）：它是一個備案，不是主要動作。
+        ⚠ **跟那一列一樣高（bar 的 19 px），不是按鈕的 34。** 一顆一般高度的鈕
+        會把兩列各撐高十幾 px，pixel size 那一格就離它換算出來的 µm 越來越遠
+        （`test_the_pixel_size_sits_with_what_it_converts` 守著）—— 而右欄在
+        1366×768 上本來就只剩幾十 px。
+        """
+        b = QPushButton(text, card)
+        b.setProperty("variant", "ghost")
+        b.setProperty("clickableText", "true")
+        b.setFixedHeight(BAR_H + 8)
+        b.setStyleSheet("min-height:0px;max-height:%dpx;padding:0px 6px;"
+                        % (BAR_H + 8))
+        b.setToolTip(tip)
+        return b
 
     def _fix_card(self, parent: QWidget) -> QWidget:
         """不對的話怎麼改 —— 軸向、覆寫、候選，以及**怎麼疊**。
@@ -1290,7 +1310,8 @@ class PitchHelperWindow(QMainWindow):
         return (self.btn_crop, self.chips_axis, self.spin_px, self.spin_py,
                 self.btn_reset, self.chk_median,
                 self.chk_edges, self.chk_grid, self.btn_ruler,
-                self.btn_details) + tuple(self._double_buttons)
+                self.btn_details) + tuple(self._double_buttons) \
+            + tuple(self._half_buttons)
 
     def _sync_enabled(self) -> None:
         """**沒有圖的時候，按不出結果的東西要看起來按不出結果。**
@@ -1306,8 +1327,10 @@ class PitchHelperWindow(QMainWindow):
         has = self._work is not None and bool(np.asarray(self._work).size)
         for w in self._needs_image():
             w.setEnabled(has)
-        for b in self._double_buttons:        # ×2 要有一個量到的數字才翻得了倍
-            b.setEnabled(has and self._m is not None)
+        for i, b in enumerate(self._double_buttons):   # 要有一個量到的數字才翻得了倍
+            b.setEnabled(has and self._scaled(i, 2.0) is not None)
+        for i, b in enumerate(self._half_buttons):     # 折半之後要還是一個週期
+            b.setEnabled(has and self._scaled(i, 0.5) is not None)
         if not has:                      # 關掉的模式不要留著
             self.btn_ruler.setChecked(False)
 
@@ -1342,19 +1365,44 @@ class PitchHelperWindow(QMainWindow):
         self._refresh()
         self.remeasure(reuse=True)
 
+    def _scaled(self, axis: int, factor: float) -> Optional[float]:
+        """那一軸現在的週期 × ``factor``；沒有答案、或結果不成一個週期就是 None。"""
+        if self._m is None:
+            return None
+        e = effective_period(self._m, self.override())[int(axis)]
+        if e < MIN_PERIOD_PX:
+            return None
+        got = e * float(factor)
+        return got if MIN_PERIOD_PX <= got <= 8192.0 else None
+
+    def _scale_axis(self, axis: int, factor: float) -> None:
+        """**那一軸**乘上 ``factor``（沒打過就從量到的那個算起），另一軸不動。
+
+        ⚠ 結果剛好等於量到的那個數字時寫 0（＝用量到的），不是把數字抄進去：
+        ×2 再 ×½ 要回到「measured」，而不是畫面說「X: yours 20 vs measured 20」。
+        """
+        got = self._scaled(axis, factor)
+        if got is None:
+            return
+        measured = float(getattr(self._m, "px" if int(axis) == 0 else "py", 0.0) or 0.0)
+        if abs(got - measured) < 1e-6:
+            got = 0.0
+        ox, oy = self.override()
+        if int(axis) == 0:
+            self._set_override(got, float(oy or 0.0))
+        else:
+            self._set_override(float(ox or 0.0), got)
+
     def _on_double(self, axis: int) -> None:
-        """**那一軸** ×2（沒打過就從量到的那個翻倍），另一軸不動。
+        """**那一軸** ×2，另一軸不動。
 
         ⚠ 2026-09-24 以前是兩軸一起翻倍 —— 見 `_period_card` 裡那兩顆的說明。
         """
-        if self._m is None:
-            return
-        ex, ey = effective_period(self._m, self.override())
-        ox, oy = self.override()
-        if int(axis) == 0:
-            self._set_override(min(8192.0, ex * 2.0), float(oy or 0.0))
-        else:
-            self._set_override(float(ox or 0.0), min(8192.0, ey * 2.0))
+        self._scale_axis(axis, 2.0)
+
+    def _on_halve(self, axis: int) -> None:
+        """**那一軸** ×½，另一軸不動（使用者 2026-09-30）。"""
+        self._scale_axis(axis, 0.5)
 
     def _on_reset(self) -> None:
         self._set_override(0.0, 0.0)
@@ -1488,7 +1536,7 @@ class PitchHelperWindow(QMainWindow):
                          if num else "Nothing measured yet.")
         for i, (bar, tag) in enumerate(zip(self._bars, self._tags)):
             show = flags[i] if self._m is not None else True
-            for w in (tag, bar, self._double_buttons[i]):
+            for w in (tag, bar, self._double_buttons[i], self._half_buttons[i]):
                 w.setVisible(show)
             if not show:
                 continue
