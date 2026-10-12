@@ -1,4 +1,7 @@
 numpy
 opencv-python
-PySide6
+# ⚠ PySide6 6.12.0（2026-10-08）在 Python 3.11 上會在直譯器收尾時 abort
+#   （Fatal Python error: bool_dealloc … finalizing；3.9／3.12／3.13 沒事）。
+#   CI 與本機都重現過，跟這個 repo 的程式碼無關。等上游修好再放開。
+PySide6<6.12
 tifffile

@@ -2115,3 +2115,18 @@ Or try、Ignore defects、Skip edge cells、Details —— 以及答案那兩列
 `tests/test_ui_pitch_helper.py` +3 條：空畫面三處寫的是那三句、方塊裡有圖、大數字藏著，
 而且**載圖之後全部讓回去**（連 `lab_next` 仍然要藏著）；三句合計不超過二十個字；格子
 畫出來的像素跟底色拉得開（量 alpha 混到底色之後的明度差 ≥ 0.12）。
+
+review 截圖順手抓到兩個舊的：量不到週期（純雜訊）時圖底下一直寫「Finding where the
+cells start…」而右上角寫著 No period found（`_draw` 先問「還沒有相位」才問「有沒有軸」，
+順序對調）；疊圖那一格沒東西可放大時仍是手形游標＋「Click to see it bigger」（§26.3 的
+規矩：不邀人去點一個什麼都不會發生的東西）。各一條測試。
+
+### 36.5 ⚠ PySide6 6.12.0 在 Python 3.11 上收尾時 abort
+
+這條 PR 的 CI 是 repo **第一次**撞上 6.12.0（2026-10-08 出的；main 上一次綠燈是 9 月
+30 日，裝到的是 6.11.2）。症狀：`tests/test_ui_every_kth.py` 10 條全過之後
+`Fatal Python error: bool_dealloc: deallocating True or False … Python runtime state:
+finalizing`，core dumped；3.9／3.12（CI）與 3.13（本機）沒事。本機用 3.11 重現：HEAD 與
+main 的 commit（fa06b09）一樣 abort，換 6.11.2 就乾淨 —— 跟這裡的程式碼無關。
+`requirements.txt`／`pyproject.toml`／CI 三處釘 `PySide6<6.12`，等上游修好再放開。
+廠內機器的 Python 版本不一定，所以不是只釘 CI。

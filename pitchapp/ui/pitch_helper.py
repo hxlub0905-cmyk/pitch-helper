@@ -880,11 +880,10 @@ class PitchHelperWindow(QMainWindow):
             % (TOKENS["bg_page"], TOKENS["hairline"], TOKENS["border_default"],
                TOKENS["radius_sm"], TOKENS["text_hint"]))
         self.cell_view.setText(PITCH_UNSET)
-        self.cell_view.setToolTip(
-            "Every cell the grid cut, averaged on top of each other. Crisp "
-            "means they landed on each other, so the period is right. Blurred "
-            "or doubled means it is not. Click to see it bigger.")
-        self.cell_view.setCursor(Qt.PointingHandCursor)
+        # 游標與 tooltip 的「點一下放大」只在真的有一格可以放大時出現
+        # （`_fill_stack`）—— 空畫面上的格子示意看起來像內容，手形游標會邀人
+        # 去點一個什麼都不會發生的東西（§26.3 的規矩）。
+        self.cell_view.setToolTip(self.CELL_TIP)
         self.cell_view.mouseReleaseEvent = lambda _e: self.show_cell_big()
         lay.addWidget(self.cell_view, 0, Qt.AlignTop)
         side = QVBoxLayout()
@@ -2067,11 +2066,20 @@ class PitchHelperWindow(QMainWindow):
         """X 那一軸（舊的進入點 —— 測試與鍵盤走這裡）。"""
         self.copy_axis(0)
 
+    CELL_TIP = ("Every cell the grid cut, averaged on top of each other. Crisp "
+                "means they landed on each other, so the period is right. "
+                "Blurred or doubled means it is not.")
+
     def _fill_stack(self) -> None:
         """疊出來那一格 ＋ 一致性 —— 這是「憑什麼相信它」那一塊。"""
         gc = self._gc
         cell = getattr(gc, "cell", None) if gc is not None else None
-        if cell is None or np.asarray(cell).size == 0:
+        has_cell = not (cell is None or np.asarray(cell).size == 0)
+        self.cell_view.setCursor(Qt.PointingHandCursor if has_cell
+                                 else Qt.ArrowCursor)
+        self.cell_view.setToolTip(self.CELL_TIP + (" Click to see it bigger."
+                                                   if has_cell else ""))
+        if not has_cell:
             self.cell_view.setFixedSize(CELL_BOX, CELL_BOX)
             if self._work is None:
                 # **還沒有圖**：用一個淡的格子**畫**出「這裡會出現疊起來的
@@ -2298,15 +2306,19 @@ class PitchHelperWindow(QMainWindow):
             self.view.set_overlay(None)
             self._say_caption("")
             return
+        flags = self._flags()
+        if not flags[0] and not flags[1]:
+            # ⚠ **這一條要在「還沒有相位」之前問。** 量不到週期（純雜訊）的時候
+            # `_m` 在、`_gc` 永遠不會來 —— 先問 `_gc` 的話，圖底下會一直寫
+            # 「Finding where the cells start…」，而右上角同時寫著 No period
+            # found：兩句話在說相反的事（2026-10-12 review 截圖抓到的）。
+            self.view.set_overlay(None)
+            self._say_caption("No period to draw.")
+            return
         if self._gc is None:
             # 有週期、還沒有相位（答案已經在上面了，疊圖還在跑）。
             self.view.set_overlay(None)
             self._say_caption(PHASE_PENDING)
-            return
-        flags = self._flags()
-        if not flags[0] and not flags[1]:
-            self.view.set_overlay(None)
-            self._say_caption("No period to draw.")
             return
         shape = self._work.shape[:2]
         # ⚠ 畫的是**真的在用的那一組**，不是量到的那一組 —— 少了這一行，

@@ -2623,3 +2623,33 @@ def test_the_idle_glyph_is_drawn_in_ink_that_shows(app, ph):
         return c.lightnessF() * a + bg.lightnessF() * (1 - a)
     gap = max(abs(shown(c) - bg.lightnessF()) for c in inked)
     assert gap >= 0.12, gap
+
+
+def test_the_idle_glyph_does_not_invite_a_click(win, ph):
+    """空畫面上的格子示意看起來像內容，而手形游標＋「Click to see it bigger」
+    會邀人去點一個什麼都不會發生的東西（§26.3 的規矩）。有一格可以放大時
+    才是手形。"""
+    from PySide6.QtCore import Qt
+    assert win.cell_view.cursor().shape() == Qt.ArrowCursor
+    assert "Click" not in win.cell_view.toolTip()
+    img = tiles(px=60, py=44)
+    win.set_image(img, "a.tif")
+    win._on_done(*_run(win, img), "")
+    assert win.cell_view.cursor().shape() == Qt.PointingHandCursor
+    assert "Click to see it bigger" in win.cell_view.toolTip()
+
+
+def test_no_period_found_does_not_say_it_is_still_looking(win, ph):
+    """⚠ 量不到週期（純雜訊）的時候 `_m` 在（px = py = 0）而疊圖永遠不會來。
+    `_draw` 先問「還沒有相位？」的話，圖底下會一直寫 PHASE_PENDING，而右上角
+    同時寫著 No period found —— 兩句話在說相反的事（2026-10-12 review 截圖）。"""
+    img = np.random.default_rng(5).normal(128, 40, (240, 320)).clip(0, 255).astype(np.uint8)
+    win.set_image(img, "noise.tif")
+    m = _measured_of(img)
+    assert m.px == 0 and m.py == 0, "這張圖要真的量不到"
+    win._on_answer(m)
+    assert win.caption.text() != ph.PHASE_PENDING
+    win._on_done(m, None, "")
+    assert win.verdict() == (ph.TONE_BAD, ph.VERDICT_NONE)
+    assert win.caption.text() != ph.PHASE_PENDING
+    assert win.view.overlay_count() == 0
