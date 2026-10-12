@@ -2601,27 +2601,25 @@ def test_the_empty_screen_keeps_its_words_few(ph):
     assert words <= 20, words
 
 
-def test_the_idle_glyph_is_drawn_in_ink_that_shows_on_both_themes(app, ph):
+def test_the_idle_glyph_is_drawn_in_ink_that_shows(app, ph):
     """⚠ 第一版用 `border_default` 畫格子，而那個灰跟 `bg_page` 只差 ΔL* 1
-    —— 畫出來等於沒畫。這一條量的是**畫出來的像素**：淺色與深色兩個主題
-    都要有一群看得見的點，而且它們跟方塊的底色拉得開。"""
+    —— 畫出來等於沒畫。這一條量的是**畫出來的像素**：要有一群看得見的點，
+    而且它們跟方塊的底色拉得開。只量淺色 —— 這個 app 只有淺色（使用者
+    2026-10-12：「只需要淺色即可」）。"""
     from PySide6.QtGui import QColor
     from pitchapp.ui import theme
-    try:
-        for name in ("light", "dark"):
-            theme.apply_theme(app, name)
-            bg = QColor(theme.TOKENS["bg_page"])
-            img = ph._idle_cell_glyph(ph.CELL_BOX).toImage()
-            inked = [img.pixelColor(x, y)
-                     for y in range(img.height()) for x in range(img.width())
-                     if img.pixelColor(x, y).alpha() > 0]
-            assert len(inked) > 200, (name, len(inked))
-            # 混到底色上之後跟底色的明度差；虛線本身是半透明的，所以看最深
-            # （或最淺）的那一群，不看平均。
-            def shown(c):
-                a = c.alphaF()
-                return (c.lightnessF() * a + bg.lightnessF() * (1 - a))
-            gap = max(abs(shown(c) - bg.lightnessF()) for c in inked)
-            assert gap >= 0.12, (name, gap)
-    finally:
-        theme.apply_theme(app)
+    theme.apply_theme(app)
+    bg = QColor(theme.TOKENS["bg_page"])
+    img = ph._idle_cell_glyph(ph.CELL_BOX).toImage()
+    inked = [img.pixelColor(x, y)
+             for y in range(img.height()) for x in range(img.width())
+             if img.pixelColor(x, y).alpha() > 0]
+    assert len(inked) > 200, len(inked)
+
+    # 混到底色上之後跟底色的明度差；虛線本身是半透明的，所以看最深的那一群，
+    # 不看平均。
+    def shown(c):
+        a = c.alphaF()
+        return c.lightnessF() * a + bg.lightnessF() * (1 - a)
+    gap = max(abs(shown(c) - bg.lightnessF()) for c in inked)
+    assert gap >= 0.12, gap

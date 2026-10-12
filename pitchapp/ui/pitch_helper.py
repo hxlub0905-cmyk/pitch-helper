@@ -2379,8 +2379,7 @@ def _idle_cell_glyph(box: int, dpr: float = 1.0) -> QPixmap:
 
     ⚠ **顏色走 `text_hint`，不走 `border_default`。** 第一版用了 `border_default`
     （它是卡片的框線），而那個灰跟 `bg_page` 只差 ΔL* 1（theme 自己的註解講過
-    這件事）—— 畫出來等於沒畫。`text_hint` 再降透明度，淺色／深色兩個主題
-    都看得到又不搶眼。
+    這件事）—— 畫出來等於沒畫。`text_hint` 再降透明度，看得到又不搶眼。
     """
     n = 3
     size = max(1, int(round(box * dpr)))

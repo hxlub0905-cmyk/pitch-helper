@@ -2106,7 +2106,7 @@ Or try、Ignore defects、Skip edge cells、Details —— 以及答案那兩列
 
 * ⚠ 格子第一版用 `border_default` 畫，而那個灰跟 `bg_page` 只差 ΔL* 1（theme 自己的
   註解講過）—— offscreen 截圖上**幾乎看不到**。改走 `text_hint` 再降透明度（線 110、
-  填色 70 / 255），淺色與深色主題都看得到、都不搶眼（兩個主題各截了一張）。
+  填色 70 / 255）。只看淺色：這個 app 沒有切到深色的入口，使用者也說「只需要淺色即可」。
 * 字數：A 案 64、C 案 17。守門釘在 20。
 * 三個字串住在 `pitch_core`（獨立出去的那個 app 要帶走的那一半，§27.7）。
 
@@ -2114,4 +2114,4 @@ Or try、Ignore defects、Skip edge cells、Details —— 以及答案那兩列
 
 `tests/test_ui_pitch_helper.py` +3 條：空畫面三處寫的是那三句、方塊裡有圖、大數字藏著，
 而且**載圖之後全部讓回去**（連 `lab_next` 仍然要藏著）；三句合計不超過二十個字；格子
-畫出來的像素在兩個主題上都跟底色拉得開（量 alpha 混到底色之後的明度差 ≥ 0.12）。
+畫出來的像素跟底色拉得開（量 alpha 混到底色之後的明度差 ≥ 0.12）。
