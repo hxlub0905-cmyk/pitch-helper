@@ -33,6 +33,7 @@ __all__ = [
     "AXES", "AXIS_X", "AXIS_Y", "AXIS_BOTH", "AXIS_ICONS", "AXIS_LABELS",
     "AXIS_HELP", "MIN_PERIOD_PX", "GRID_HEX", "NEXT_STEP", "PITCH_UNSET",
     "PITCH_NOT_USED", "WINDOW_TITLE", "PHASE_PENDING",
+    "IDLE_STACK", "IDLE_PERIOD", "IDLE_NM",
     "VERDICT_OK", "VERDICT_BLURRED", "VERDICT_NONE", "VERDICT_TYPED",
     "VERDICT_CHECK", "VERDICT_BUSY_PERIOD", "VERDICT_BUSY_STACK",
     "VERDICT_NOISY", "is_too_noisy",
@@ -110,6 +111,20 @@ NEXT_STEP = "Copy it into your tool's cell size fields."
 #: 還沒有答案的那一格寫什麼。**一個破折號，不是 0** —— 0 在那一格看起來像一個
 #: 量出來的答案（同 `gc_generator.PERIOD_UNSET`，F117 G5 定的）。
 PITCH_UNSET = "—"
+
+#: **還沒有圖**的時候右欄寫什麼（F120 §36）。三句，各在它之後會被答案頂掉的那個
+#: 位置上 —— 疊圖那一格旁邊、大數字那一行、pixel size 底下。
+#:
+#: ⚠ **只在沒有圖的時候**。圖一進來（還沒量完）那幾秒寫的是 `PITCH_UNSET`，
+#: 不是這幾句：那一刻的訊息是「在量了」，不是「等你丟圖」。
+#:
+#: ⚠ **字要少。** 第一版（§36 的 A 案）三處合計六十幾個字，使用者問「會不會
+#: 字太多」—— 會。畫布正中央已經在講要做什麼（§26.4），右欄不必再講一次，
+#: 它只要說「這裡之後會出現什麼」。所以疊圖那一格用一個淡的格子**畫**出來，
+#: 字只剩下面這三句。
+IDLE_STACK = "Every cell, stacked. Sharp means the period is right."
+IDLE_PERIOD = "Waiting for an image"
+IDLE_NM = "Optional. Adds the pitch in µm."
 
 #: 這個視窗叫什麼。**只有它自己的名字**，不掛主程式 —— 見 `__init__` 的說明。
 WINDOW_TITLE = "Pitch helper"
