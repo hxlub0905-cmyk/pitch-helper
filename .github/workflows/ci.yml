@@ -51,7 +51,7 @@ jobs:
         # 都要改** —— 下面那一步會擋住漏掉的情況。
         run: |
           python -m pip install --upgrade pip
-          pip install numpy opencv-python-headless tifffile PySide6 pytest
+          pip install numpy opencv-python-headless tifffile "PySide6<6.12" pytest
 
       - name: Check the install list still covers requirements.txt
         # 與其靠人記得，不如讓 CI 自己發現：requirements.txt 有、CI 沒有的那個

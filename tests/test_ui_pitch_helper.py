@@ -2560,3 +2560,96 @@ def test_a_greyed_out_link_button_stops_looking_clickable(app, ph):
         assert not near, ("灰掉的開關還是 accent 藍", len(near))
     finally:
         win.close()
+
+
+# --------------------------------------------------------------------------- #
+# 17. 空畫面的右欄說「這裡之後會出現什麼」，而且字要少（2026-10-12，
+#     使用者看過三張預覽之後：「好 C」）
+# --------------------------------------------------------------------------- #
+def test_the_empty_screen_says_what_will_appear_instead_of_a_dash(win, ph):
+    """⚠ **一個從來沒有被看過的狀態，就是一個從來沒有被設計過的狀態**（§26）。
+
+    §26 那一輪修的是空畫面的 bug，不是它的樣子：右欄只是把載入後的版面清空
+    —— 一個 36 px 的破折號、一個寫著「—」的灰方塊、一半高度的空白。使用者
+    問「會覺得很醜很空嗎」—— 空是真的。
+
+    沒有圖的時候三個位置各換一句（疊圖那一格旁邊、大數字那一行、pixel size
+    底下），灰方塊裡**畫**一個格子；**圖一進來就讓回去** —— 那幾秒要說的是
+    「在量了」（`PITCH_UNSET`），不是「等你丟圖」。
+    """
+    assert not win.cell_view.pixmap().isNull(), "灰方塊裡要有格子的示意"
+    assert win.cell_view.text() == ""
+    assert win.lab_stack.text() == ph.IDLE_STACK
+    assert win.lab_big.isHidden(), "36 px 的破折號看起來像畫壞了"
+    assert not win.lab_um.isHidden() and win.lab_um.text() == ph.IDLE_PERIOD
+    assert not win.lab_nm_hint.isHidden() and win.lab_nm_hint.text() == ph.IDLE_NM
+    assert win.lab_next.isHidden(), "「然後呢」那一行的規矩不變：有答案才出現"
+
+    win.set_image(tiles(px=60, py=44), "a.tif")
+    assert win.cell_view.pixmap().isNull() and win.cell_view.text() == ph.PITCH_UNSET
+    assert win.lab_stack.text() == ""
+    assert not win.lab_big.isHidden() and win.lab_big.text() == ph.PITCH_UNSET
+    assert win.lab_um.isHidden(), "沒填 pixel size 就沒有 µm 那一行（第十七輪）"
+    assert win.lab_nm_hint.isHidden()
+
+
+def test_the_empty_screen_keeps_its_words_few(ph):
+    """使用者：「都顯示文字，會不會字太多?」—— 會。第一版三處合計六十幾個字；
+    畫布正中央已經在講要做什麼（§26.4），右欄只要說「這裡之後會出現什麼」。
+    這一條把上限釘在二十個字。"""
+    words = sum(len(s.split()) for s in (ph.IDLE_STACK, ph.IDLE_PERIOD, ph.IDLE_NM))
+    assert words <= 20, words
+
+
+def test_the_idle_glyph_is_drawn_in_ink_that_shows(app, ph):
+    """⚠ 第一版用 `border_default` 畫格子，而那個灰跟 `bg_page` 只差 ΔL* 1
+    —— 畫出來等於沒畫。這一條量的是**畫出來的像素**：要有一群看得見的點，
+    而且它們跟方塊的底色拉得開。只量淺色 —— 這個 app 只有淺色（使用者
+    2026-10-12：「只需要淺色即可」）。"""
+    from PySide6.QtGui import QColor
+    from pitchapp.ui import theme
+    theme.apply_theme(app)
+    bg = QColor(theme.TOKENS["bg_page"])
+    img = ph._idle_cell_glyph(ph.CELL_BOX).toImage()
+    inked = [img.pixelColor(x, y)
+             for y in range(img.height()) for x in range(img.width())
+             if img.pixelColor(x, y).alpha() > 0]
+    assert len(inked) > 200, len(inked)
+
+    # 混到底色上之後跟底色的明度差；虛線本身是半透明的，所以看最深的那一群，
+    # 不看平均。
+    def shown(c):
+        a = c.alphaF()
+        return c.lightnessF() * a + bg.lightnessF() * (1 - a)
+    gap = max(abs(shown(c) - bg.lightnessF()) for c in inked)
+    assert gap >= 0.12, gap
+
+
+def test_the_idle_glyph_does_not_invite_a_click(win, ph):
+    """空畫面上的格子示意看起來像內容，而手形游標＋「Click to see it bigger」
+    會邀人去點一個什麼都不會發生的東西（§26.3 的規矩）。有一格可以放大時
+    才是手形。"""
+    from PySide6.QtCore import Qt
+    assert win.cell_view.cursor().shape() == Qt.ArrowCursor
+    assert "Click" not in win.cell_view.toolTip()
+    img = tiles(px=60, py=44)
+    win.set_image(img, "a.tif")
+    win._on_done(*_run(win, img), "")
+    assert win.cell_view.cursor().shape() == Qt.PointingHandCursor
+    assert "Click to see it bigger" in win.cell_view.toolTip()
+
+
+def test_no_period_found_does_not_say_it_is_still_looking(win, ph):
+    """⚠ 量不到週期（純雜訊）的時候 `_m` 在（px = py = 0）而疊圖永遠不會來。
+    `_draw` 先問「還沒有相位？」的話，圖底下會一直寫 PHASE_PENDING，而右上角
+    同時寫著 No period found —— 兩句話在說相反的事（2026-10-12 review 截圖）。"""
+    img = np.random.default_rng(5).normal(128, 40, (240, 320)).clip(0, 255).astype(np.uint8)
+    win.set_image(img, "noise.tif")
+    m = _measured_of(img)
+    assert m.px == 0 and m.py == 0, "這張圖要真的量不到"
+    win._on_answer(m)
+    assert win.caption.text() != ph.PHASE_PENDING
+    win._on_done(m, None, "")
+    assert win.verdict() == (ph.TONE_BAD, ph.VERDICT_NONE)
+    assert win.caption.text() != ph.PHASE_PENDING
+    assert win.view.overlay_count() == 0

@@ -77,7 +77,8 @@ from typing import Any, List, Optional, Sequence, Tuple
 import numpy as np
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import (
-    QColor, QGuiApplication, QImage, QKeySequence, QPainter, QPixmap, QShortcut,
+    QColor, QGuiApplication, QImage, QKeySequence, QPainter, QPen, QPixmap,
+    QShortcut,
 )
 from PySide6.QtWidgets import (
     QAbstractSpinBox, QApplication, QCheckBox, QDoubleSpinBox, QFileDialog,
@@ -121,7 +122,7 @@ __all__ = [
     "detail_rows", "trust_note", "MIN_CELLS_TO_TRUST",
     "MAX_CANDIDATES", "cells_along", "trim_to_inner", "NEXT_STEP",
     "MIN_CELLS_AFTER_TRIM", "run", "VERDICT_EVERY_KTH", "every_kth_hint",
-    "compare_strip",
+    "compare_strip", "IDLE_STACK", "IDLE_PERIOD", "IDLE_NM",
 ]
 
 # ⚠ **不碰 widget 的那一半住在 `pitch_core`**（2026-09-22 拆的，F120 第十七
@@ -135,7 +136,8 @@ __all__ = [
 from .pitch_core import (
     AGREE_GOOD_FROM, AXES, AXIS_BOTH, AXIS_HELP, AXIS_ICONS, AXIS_LABELS,
     AXIS_X, AXIS_Y, BLURRED_BELOW, CONF_GOOD_FROM, CONF_TYPED,
-    GRID_HEX, MAX_CANDIDATES, MIN_CELLS_AFTER_TRIM, MIN_CELLS_TO_TRUST,
+    GRID_HEX, IDLE_NM, IDLE_PERIOD, IDLE_STACK, MAX_CANDIDATES,
+    MIN_CELLS_AFTER_TRIM, MIN_CELLS_TO_TRUST,
     MIN_PERIOD_PX, NEXT_STEP, Override, PHASE_PENDING, PITCH_NOT_USED,
     PITCH_UNSET,
     TONE_BAD, TONE_GOOD, TONE_WARN, VERDICT_BLURRED, VERDICT_BUSY_PERIOD,
@@ -878,11 +880,10 @@ class PitchHelperWindow(QMainWindow):
             % (TOKENS["bg_page"], TOKENS["hairline"], TOKENS["border_default"],
                TOKENS["radius_sm"], TOKENS["text_hint"]))
         self.cell_view.setText(PITCH_UNSET)
-        self.cell_view.setToolTip(
-            "Every cell the grid cut, averaged on top of each other. Crisp "
-            "means they landed on each other, so the period is right. Blurred "
-            "or doubled means it is not. Click to see it bigger.")
-        self.cell_view.setCursor(Qt.PointingHandCursor)
+        # 游標與 tooltip 的「點一下放大」只在真的有一格可以放大時出現
+        # （`_fill_stack`）—— 空畫面上的格子示意看起來像內容，手形游標會邀人
+        # 去點一個什麼都不會發生的東西（§26.3 的規矩）。
+        self.cell_view.setToolTip(self.CELL_TIP)
         self.cell_view.mouseReleaseEvent = lambda _e: self.show_cell_big()
         lay.addWidget(self.cell_view, 0, Qt.AlignTop)
         side = QVBoxLayout()
@@ -1031,6 +1032,13 @@ class PitchHelperWindow(QMainWindow):
         self.lab_next.setWordWrap(True)
         self.lab_next.setVisible(False)
         lay.addWidget(self.lab_next)
+        # **還沒有圖的時候**同一個位置換一句：pixel size 是空畫面上唯一可以先
+        # 填的東西（§26.3），但它夾在一排灰掉的東西中間，看不出來「可以先填」。
+        # ⚠ 不借 `lab_next`：那一行的規矩是「有答案才出現」，而這一句相反。
+        self.lab_nm_hint = QLabel(IDLE_NM, card)
+        self.lab_nm_hint.setObjectName("paramHint")
+        self.lab_nm_hint.setWordWrap(True)
+        lay.addWidget(self.lab_nm_hint)
         return card
 
     def _axis_step_button(self, card: QWidget, text: str, tip: str) -> QPushButton:
@@ -1620,6 +1628,16 @@ class PitchHelperWindow(QMainWindow):
         # 沒填 pixel size 就沒有這一行 —— 一個空著的標籤照樣佔一行高，而那一行
         # 在大數字底下看起來像「這裡本來該有東西」。
         self.lab_um.setVisible(bool(ums))
+        # **還沒有圖**：一個 36 px 的破折號看起來像畫壞了，不像「還沒量」。
+        # 大數字那一行讓位給一句等待語（放在 µm 那一行，它本來就是副標的字級），
+        # pixel size 底下補一句它可以先填（F120 §36）。圖一進來這三句就讓回去
+        # —— 那幾秒要說的是 `PITCH_UNSET`（「在量了」），不是「等你丟圖」。
+        idle = self._work is None
+        self.lab_big.setVisible(not idle)
+        if idle:
+            self.lab_um.setText(IDLE_PERIOD)
+            self.lab_um.setVisible(True)
+        self.lab_nm_hint.setVisible(idle)
         # **按鈕自己講它會複製什麼** —— 「copy 是 copy 誰？」的另一半答案。
         what = self.answer_text()
         self.lab_next.setVisible(bool(what))
@@ -2048,13 +2066,31 @@ class PitchHelperWindow(QMainWindow):
         """X 那一軸（舊的進入點 —— 測試與鍵盤走這裡）。"""
         self.copy_axis(0)
 
+    CELL_TIP = ("Every cell the grid cut, averaged on top of each other. Crisp "
+                "means they landed on each other, so the period is right. "
+                "Blurred or doubled means it is not.")
+
     def _fill_stack(self) -> None:
         """疊出來那一格 ＋ 一致性 —— 這是「憑什麼相信它」那一塊。"""
         gc = self._gc
         cell = getattr(gc, "cell", None) if gc is not None else None
-        if cell is None or np.asarray(cell).size == 0:
-            self.cell_view.setPixmap(QPixmap())
+        has_cell = not (cell is None or np.asarray(cell).size == 0)
+        self.cell_view.setCursor(Qt.PointingHandCursor if has_cell
+                                 else Qt.ArrowCursor)
+        self.cell_view.setToolTip(self.CELL_TIP + (" Click to see it bigger."
+                                                   if has_cell else ""))
+        if not has_cell:
             self.cell_view.setFixedSize(CELL_BOX, CELL_BOX)
+            if self._work is None:
+                # **還沒有圖**：用一個淡的格子**畫**出「這裡會出現疊起來的
+                # 那一格」，字只留一句（F120 §36 —— 字要少）。
+                self.cell_view.setText("")
+                self.cell_view.setPixmap(_idle_cell_glyph(
+                    CELL_BOX, self.cell_view.devicePixelRatioF()))
+                self.bar_agree.set_text_only("")
+                self.lab_stack.setText(IDLE_STACK)
+                return
+            self.cell_view.setPixmap(QPixmap())
             self.cell_view.setText(PITCH_UNSET)
             # ⚠ **還沒疊過的時候不畫那條軌道**（`set_text_only`）。
             # 這一行本來是 `set_value(0.0, …)`，而自從 0 分改成畫一顆點之後，
@@ -2270,15 +2306,19 @@ class PitchHelperWindow(QMainWindow):
             self.view.set_overlay(None)
             self._say_caption("")
             return
+        flags = self._flags()
+        if not flags[0] and not flags[1]:
+            # ⚠ **這一條要在「還沒有相位」之前問。** 量不到週期（純雜訊）的時候
+            # `_m` 在、`_gc` 永遠不會來 —— 先問 `_gc` 的話，圖底下會一直寫
+            # 「Finding where the cells start…」，而右上角同時寫著 No period
+            # found：兩句話在說相反的事（2026-10-12 review 截圖抓到的）。
+            self.view.set_overlay(None)
+            self._say_caption("No period to draw.")
+            return
         if self._gc is None:
             # 有週期、還沒有相位（答案已經在上面了，疊圖還在跑）。
             self.view.set_overlay(None)
             self._say_caption(PHASE_PENDING)
-            return
-        flags = self._flags()
-        if not flags[0] and not flags[1]:
-            self.view.set_overlay(None)
-            self._say_caption("No period to draw.")
             return
         shape = self._work.shape[:2]
         # ⚠ 畫的是**真的在用的那一組**，不是量到的那一組 —— 少了這一行，
@@ -2341,6 +2381,46 @@ def _pixmap(arr: np.ndarray, box: int) -> QPixmap:
     img = QImage(a.data, w, h, w, QImage.Format_Grayscale8).copy()
     return QPixmap.fromImage(img).scaled(box, box, Qt.KeepAspectRatio,
                                          Qt.FastTransformation)
+
+
+def _idle_cell_glyph(box: int, dpr: float = 1.0) -> QPixmap:
+    """空畫面上疊圖那一格的示意：3×3 的淡虛線格，中間一格填起來。
+
+    它在說「這裡之後會出現**一格**，而那一格是從很多格疊出來的」—— 用畫的，
+    不用字（F120 §36）。
+
+    ⚠ **顏色走 `text_hint`，不走 `border_default`。** 第一版用了 `border_default`
+    （它是卡片的框線），而那個灰跟 `bg_page` 只差 ΔL* 1（theme 自己的註解講過
+    這件事）—— 畫出來等於沒畫。`text_hint` 再降透明度，看得到又不搶眼。
+    """
+    n = 3
+    size = max(1, int(round(box * dpr)))
+    pm = QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    ink = QColor(TOKENS["text_hint"])
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    margin = size * 0.22
+    cell = (size - 2 * margin) / n
+    line = QColor(ink)
+    line.setAlpha(110)
+    pen = QPen(line, max(1.0, dpr))
+    pen.setStyle(Qt.DashLine)
+    p.setPen(pen)
+    for i in range(n + 1):
+        at = int(round(margin + i * cell))
+        p.drawLine(at, int(round(margin)), at, int(round(size - margin)))
+        p.drawLine(int(round(margin)), at, int(round(size - margin)), at)
+    fill = QColor(ink)
+    fill.setAlpha(70)
+    p.setPen(QPen(ink, max(1.0, dpr)))
+    p.setBrush(fill)
+    k = n // 2
+    p.drawRect(int(round(margin + k * cell)), int(round(margin + k * cell)),
+               int(round(cell)), int(round(cell)))
+    p.end()
+    pm.setDevicePixelRatio(dpr)
+    return pm
 
 
 def _qimage_to_gray(img: Optional[QImage]) -> Optional[np.ndarray]:
