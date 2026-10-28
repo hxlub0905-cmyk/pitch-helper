@@ -1,7 +1,11 @@
+# ASCII only, comments included -- tests/test_build_exe.py checks it.
+# Older pip (what a fresh Python 3.9 venv ships with) reads this file in the
+# console code page, cp950 on a Chinese Windows, and stops at the first
+# UTF-8 byte: "UnicodeDecodeError: 'cp950' codec can't decode byte 0xe2".
 numpy
 opencv-python
-# ⚠ PySide6 6.12.0（2026-10-08）在 Python 3.11 上會在直譯器收尾時 abort
-#   （Fatal Python error: bool_dealloc … finalizing；3.9／3.12／3.13 沒事）。
-#   CI 與本機都重現過，跟這個 repo 的程式碼無關。等上游修好再放開。
+# PySide6 6.12.0 aborts at interpreter exit on Python 3.11
+# (Fatal Python error: bool_dealloc). Why and when to lift it:
+# docs/F120-pitch-helper.md section 36.5.
 PySide6<6.12
 tifffile

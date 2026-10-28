@@ -39,7 +39,7 @@ Inspection 的 ADC 工具）裡的一個小工具，2026-09-23 由 `tools/extrac
 ```bash
 pip install -r requirements.txt && pip install pytest ruff==0.15.8
 ruff check                                        # 幾秒，先跑這個
-QT_QPA_PLATFORM=offscreen python -m pytest -q     # 331 條（Windows 不用設）
+QT_QPA_PLATFORM=offscreen python -m pytest -q     # 339 條（Windows 不用設）
 ```
 
 ⚠ **動版面之前先讀 [`docs/F120-pitch-helper.md`](docs/F120-pitch-helper.md)**
@@ -70,11 +70,19 @@ QT_QPA_PLATFORM=offscreen python -m pytest -q     # 331 條（Windows 不用設�
 * `build_exe.bat --console` —— 多一個黑色主控台視窗。exe 開不起來或閃退的時候
   用這個重打一次，錯誤訊息會留在那個視窗裡。
 * 不能上網、但手上的 Python 已經裝好 PyInstaller 與相依套件：直接
-  `python tools\build_exe.py`（一樣吃 `--onedir`／`--console`）。
+  `python tools\build_exe.py`（一樣吃 `--onedir`／`--console`／`--no-check`）。
+* **打完會先驗兩個圖示才說 OK**：exe 檔案本身的圖示（檔案總管裡、雙擊之前看到
+  的）跟 `pitch.svg` 產的那一顆一樣，以及程式開起來之後視窗／工作列上的圖示
+  畫得出來（它會不開視窗地把 exe 跑一次）。少一個就 `FAILED` 並說原因 ——
+  兩種都不會自己報錯，只會安靜地變成預設圖示。`--no-check` 跳過這一步。
+  檔案總管有圖示快取：驗過了但看到的還是舊圖示，就是快取，換個檔名再看。
 
-⚠ `build_exe.bat` 要維持**純 ASCII、不用 label／goto** —— cmd.exe 用主控台的
-code page（cp950）讀它，而這個 repo 的檔案一律是 LF 換行。理由與守門的測試在
-`tests/test_build_exe.py`；打包的設定全部在 `tools/build_exe.py`，不在 .bat 裡。
+⚠ `build_exe.bat` 與 `requirements.txt` 都要維持**純 ASCII**（註解也一樣）——
+cmd.exe 用主控台的 code page（cp950）讀 .bat，舊版 pip 也用它讀 requirements
+（2026-10-28 實撞：`UnicodeDecodeError: 'cp950' codec can't decode byte 0xe2`）。
+.bat 另外**不用 label／goto**，因為這個 repo 的檔案一律是 LF 換行。理由與守門的
+測試在 `tests/test_build_exe.py`；打包的設定全部在 `tools/build_exe.py`，不在
+.bat 裡。
 
 ## 拿不到 git 的機器（廠內）
 

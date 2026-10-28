@@ -2441,10 +2441,30 @@ def _qimage_to_gray(img: Optional[QImage]) -> Optional[np.ndarray]:
     return buf[:h * stride].reshape(h, stride)[:, :w].copy()
 
 
+#: 打包之後的自我檢查：``PitchHelper.exe --check-icon <檔案>`` 不開視窗，把
+#: :func:`branding.icon_problem` 的答案寫進那個檔案就結束（``ok`` 或理由）。
+#: 用它的是 `tools/build_exe.py` —— 打完包之後問 exe 本人「你的圖示畫得出來
+#: 嗎」，因為 plugin 沒打包進去的時候圖示是**安靜地**不見，不會報錯。
+#: 答案寫進檔案而不是印出來：``--windowed`` 的 exe 沒有 stdout。
+CHECK_ICON_FLAG = "--check-icon"
+
+
+def _check_icon(out_path: str) -> int:
+    problem = branding.icon_problem()
+    tmp = out_path + ".tmp"                          # atomic
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write("ok\n" if problem is None else problem + "\n")
+    os.replace(tmp, out_path)
+    return 0 if problem is None else 1
+
+
 def run(argv: Optional[Sequence[str]] = None) -> int:
     """``python main.py`` 的進入點。"""
     from PySide6.QtWidgets import QApplication
-    app = QApplication.instance() or QApplication(list(argv or []))
+    argv = list(argv or [])
+    app = QApplication.instance() or QApplication(argv)
+    if len(argv) == 2 and argv[0] == CHECK_ICON_FLAG:
+        return _check_icon(argv[1])
     theme.apply_theme(app)
     # 這條路是**獨立**的入口（`python -m d4t pitch`），所以整個 app 的圖示
     # 就是 helper 的，不是 Studio 的。
