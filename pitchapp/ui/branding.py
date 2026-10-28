@@ -16,11 +16,12 @@ Studio 開不起來，而受限機器是用「複製檔案」的方式部署的�
 from __future__ import annotations
 
 import os
+from typing import Optional
 
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QIcon, QImage
 
 __all__ = ["ASSETS_DIR", "ICON_PATH", "PITCH_ICON_PATH", "WORDMARK_PATH",
-           "WORDMARK_DARK_PATH", "app_icon", "pitch_icon"]
+           "WORDMARK_DARK_PATH", "app_icon", "icon_problem", "pitch_icon"]
 
 #: 這個目錄裡的東西要跟著套件走 —— 見 ``pyproject.toml`` 的 package-data。
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
@@ -63,3 +64,38 @@ def pitch_icon() -> QIcon:
     if not os.path.isfile(PITCH_ICON_PATH):
         return QIcon()
     return QIcon(PITCH_ICON_PATH)
+
+
+#: :func:`icon_problem` 畫哪幾個尺寸：標題列（16）、工作列（32）、Alt+Tab（48）、
+#: 檔案總管的大圖示（256）。
+_CHECK_SIZES = (16, 32, 48, 256)
+
+
+def icon_problem() -> Optional[str]:
+    """Pitch helper 的視窗圖示畫不畫得出東西：畫得出來回 ``None``，否則回**理由**。
+
+    :func:`pitch_icon` 出事的時候刻意不拋例外（視窗照開），代價是「圖示不見了」
+    只看得到、不會報錯。打包成 exe 之後最容易這樣：SVG 要靠 Qt 的 svg plugin
+    才畫得出來，plugin 沒被打包進去的時候 ``QIcon`` 是空的、視窗照開（2026-10-28
+    在打包出來的程式裡拿掉那兩個 plugin 實測）。所以這裡**真的畫一次**，再看有
+    沒有不透明的像素 —— `tools/build_exe.py` 打完包會用
+    ``PitchHelper.exe --check-icon`` 問 exe 本人。
+
+    要先有 ``QGuiApplication``（``QIcon.pixmap`` 需要）。
+    """
+    if not os.path.isfile(PITCH_ICON_PATH):
+        return "the icon file is not there: %s" % PITCH_ICON_PATH
+    icon = pitch_icon()
+    for size in _CHECK_SIZES:
+        img = icon.pixmap(size, size).toImage()
+        if img.isNull():
+            return ("the icon draws nothing at %dpx - Qt's SVG plugin is "
+                    "missing, or %s is not a readable SVG"
+                    % (size, PITCH_ICON_PATH))
+        # ARGB32 在記憶體裡是 B, G, R, A —— 每四個 byte 的第四個是 alpha。
+        argb = img.convertToFormat(QImage.Format_ARGB32)
+        alpha = bytes(argb.constBits())[3::4]
+        if max(alpha) < 255:
+            return ("the icon draws only see-through pixels at %dpx - is %s "
+                    "a broken SVG?" % (size, PITCH_ICON_PATH))
+    return None

@@ -12,6 +12,8 @@ rem
 rem  Options are passed on to tools\build_exe.py:
 rem    build_exe.bat --onedir     a folder instead of one .exe, starts faster
 rem    build_exe.bat --console    keep a console window, to see a crash
+rem    build_exe.bat --no-check   do not start the new exe once to check
+rem                               that it has its icons
 rem
 rem  RULES FOR EDITING THIS FILE - tests/test_build_exe.py checks them:
 rem   * Pure ASCII only. cmd.exe reads a .bat in the console code page,
@@ -65,7 +67,10 @@ if not exist "%VPY%" (
 )
 
 echo [3/4] Installing requirements.txt + PyInstaller ...
-"%VPY%" -m pip install --disable-pip-version-check -r requirements.txt "pyinstaller>=6"
+rem -X utf8: older pip reads requirements.txt in the console code page,
+rem cp950 here, and stops at the first UTF-8 byte - UnicodeDecodeError,
+rem 2026-10-28. The file is kept ASCII too; this is the second guard.
+"%VPY%" -X utf8 -m pip install --disable-pip-version-check -r requirements.txt "pyinstaller>=6"
 if errorlevel 1 (
     echo.
     echo [ERROR] pip install failed.

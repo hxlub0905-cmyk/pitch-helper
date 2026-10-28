@@ -4,11 +4,14 @@
 這裡守的是那幾件「打出來會壞、而症狀要到那台 Windows 上才看得到」的事：
 
 * `.bat` 在 cmd.exe 上讀不讀得動（純 ASCII、沒有 label、區塊裡的 echo 沒有括號）
+* `requirements.txt` 在舊版 pip 上讀不讀得動（純 ASCII）
 * 資料檔有沒有跟著進 exe（少了圖示不會報錯，只會安靜地沒有）
 * exe 的圖示是不是一個真的 `.ico`
 * 交給 PyInstaller 的路徑是不是絕對路徑
+* 打完包之後那一步「驗兩個圖示」驗得出東西：讀 exe 裡的圖示、`--check-icon`
+  開一次程式
 
-⚠ 圖示那一條要 Qt（`PySide6.QtSvg`），沒有就 skip。
+⚠ 要畫圖示的那幾條要 Qt（`PySide6.QtSvg`），沒有就 skip。
 """
 from __future__ import annotations
 
@@ -110,6 +113,31 @@ def test_the_bat_points_at_files_that_exist():
         assert os.path.isfile(os.path.join(REPO, *rel.split("\\"))), rel
 
 
+def test_pip_can_read_requirements_txt_on_a_chinese_windows():
+    """⚠ **`requirements.txt` 一個非 ASCII 位元組都不准有，註解也一樣。**
+
+    2026-10-28 使用者雙擊 `build_exe.bat`，停在 `[3/4]`：
+    `UnicodeDecodeError: 'cp950' codec can't decode byte 0xe2 in position 22`。
+    0xe2 是註解裡那個 `⚠` 的第一個 byte。新建的 Python 3.9 venv 帶的是舊版
+    pip，它讀 requirements 檔用的是主控台的 code page（cp950），不是 UTF-8
+    （新版 pip 才改成先試 UTF-8）。本機用 pip 21.3.1 重現過同一個 byte、同一個
+    位置。
+
+    兩道防線，都要在：檔案本身是 ASCII；.bat 叫 pip 時加 `-X utf8`（UTF-8
+    模式，舊版 pip 也照 UTF-8 讀）——那是給「有人在記事本裡加了一行中文註解」
+    的那一天。
+    """
+    with open(os.path.join(REPO, "requirements.txt"), "rb") as f:
+        lines = f.read().split(b"\n")
+    bad = [(i, ln) for i, ln in enumerate(lines, 1) if any(b > 127 for b in ln)]
+    assert not bad, "requirements.txt 第 %d 行有非 ASCII：%r" % bad[0]
+
+    pip_lines = [ln for _i, ln in _code_lines() if "-m pip install" in ln]
+    assert pip_lines, "build_exe.bat 不再用 pip 裝 requirements.txt 了？"
+    for ln in pip_lines:
+        assert "-X utf8 -m pip" in ln, ln
+
+
 # --------------------------------------------------------------------------- #
 # 2. 交給 PyInstaller 的東西
 # --------------------------------------------------------------------------- #
@@ -196,3 +224,113 @@ def test_the_exe_icon_is_a_real_multi_size_ico(tmp_path):
         assert alpha[0, 0] == 0, "%dpx 的角落不是透明的" % size
         end = off + length
     assert end == len(data)
+
+
+# --------------------------------------------------------------------------- #
+# 4. 打完包之後驗兩個圖示（`build_exe.exe_problem`）
+# --------------------------------------------------------------------------- #
+def _windows_exes_with_an_icon():
+    """手邊一定有、而且**帶圖示**的真 Windows 執行檔：pip 自己帶的 launcher
+    （`pip/_vendor/distlib/*.exe`，每個平台的 pip 都有）。拿真的 exe 而不是
+    自己拼一個：自己拼的跟 `exe_icon` 用同一套理解，錯了也會對得上。"""
+    import pip
+    folder = os.path.join(os.path.dirname(pip.__file__), "_vendor", "distlib")
+    if not os.path.isdir(folder):
+        return []
+    return sorted(os.path.join(folder, n) for n in os.listdir(folder)
+                  if n.endswith(".exe"))
+
+
+def test_the_icon_inside_a_real_windows_exe_can_be_read():
+    exes = _windows_exes_with_an_icon()
+    if not exes:
+        pytest.skip("這個 pip 沒帶 distlib 的 launcher")
+    for exe in exes:
+        got = build_exe.exe_icon(exe)
+        assert got, exe
+        for size, length in got:
+            assert size in (16, 24, 32, 48, 64, 128, 256), (exe, got)
+            assert length > 0, (exe, got)
+
+    # 不是 Windows 執行檔：回 None（不是 []，那代表「是 exe 但沒有圖示」）
+    assert build_exe.exe_icon(os.path.join(REPO, "main.py")) is None
+
+
+def test_an_exe_with_someone_elses_icon_does_not_pass(tmp_path):
+    """⚠ 沒給 `--icon` 的時候 PyInstaller 放的是**它自己的**預設圖示 —— exe
+    「有圖示」不代表是我們的，所以比的是每一張的邊長與位元組數。"""
+    exes = _windows_exes_with_an_icon()
+    if not exes:
+        pytest.skip("這個 pip 沒帶 distlib 的 launcher")
+    ico = tmp_path / "ours.ico"
+    ico.write_bytes(build_exe.ico_bytes([(16, b"x" * 40), (256, b"y" * 90)]))
+    assert build_exe.ico_icon(str(ico)) == [(16, 40), (256, 90)]
+
+    problem = build_exe.exe_problem(exes[0], str(ico),
+                                    str(tmp_path / "answer.txt"))
+    assert problem and "is not the one made from" in problem, problem
+    assert not (tmp_path / "answer.txt").exists(), "沒過第一關就不該去開 exe"
+
+
+def test_a_program_that_cannot_start_does_not_pass(tmp_path):
+    """exe 開不起來（少 DLL、一 import 就當）的時候不會留下答案 —— 那要說成
+    「開不起來」，不是「沒有圖示」。"""
+    answer = str(tmp_path / "answer.txt")
+    problem = build_exe.runtime_icon_problem(
+        [sys.executable, "-c", "import sys; sys.exit(3)"], answer)
+    assert problem and "code 3" in problem and "does not start" in problem
+
+    problem = build_exe.runtime_icon_problem(
+        [sys.executable, "-c", "import time; time.sleep(30)"], answer,
+        timeout=0.5)
+    assert problem and "did not answer within" in problem, problem
+
+
+@pytest.fixture
+def qapp():
+    pytest.importorskip("PySide6.QtSvg", exc_type=ImportError)
+    from PySide6.QtWidgets import QApplication
+    return QApplication.instance() or QApplication([])
+
+
+def test_the_window_icon_check_asks_the_real_program(tmp_path, monkeypatch,
+                                                     qapp):
+    """`build_exe` 打完包用 `PitchHelper.exe --check-icon <檔案>` 問 exe 本人；
+    這裡問的是 `python main.py` —— 同一個進入點、同一個旗標。
+
+    ⚠ 旗標在兩邊各寫了一次（`build_exe.CHECK_ICON_FLAG` 與
+    `pitch_helper.CHECK_ICON_FLAG`，前者不能 import 後者：那會把整個 UI 拉進
+    打包工具），**這一條就是對兩邊的那一道**：對不上的話程式會當成一般啟動、
+    開出視窗，然後停在 timeout。
+    """
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    answer = tmp_path / "answer.txt"
+    problem = build_exe.runtime_icon_problem(
+        [sys.executable, os.path.join(REPO, build_exe.ENTRY)], str(answer),
+        timeout=60)
+    assert problem is None, problem
+    assert answer.read_text(encoding="utf-8") == "ok\n"
+
+
+def test_the_window_icon_check_says_why(tmp_path, monkeypatch, qapp):
+    """圖示畫不出來的三種樣子，各自要有**看得懂的理由**（打包的人只看得到
+    那一句）。"""
+    from pitchapp.ui import branding
+
+    monkeypatch.setattr(branding, "PITCH_ICON_PATH", str(tmp_path / "no.svg"))
+    assert "is not there" in branding.icon_problem()
+
+    broken = tmp_path / "broken.svg"
+    broken.write_text("not an svg\n", encoding="utf-8")
+    monkeypatch.setattr(branding, "PITCH_ICON_PATH", str(broken))
+    assert "draws nothing" in branding.icon_problem()
+
+    blank = tmp_path / "blank.svg"
+    blank.write_text('<svg xmlns="http://www.w3.org/2000/svg" '
+                     'viewBox="0 0 8 8" width="8" height="8"/>\n',
+                     encoding="utf-8")
+    monkeypatch.setattr(branding, "PITCH_ICON_PATH", str(blank))
+    assert "see-through" in branding.icon_problem()
+
+    monkeypatch.undo()
+    assert branding.icon_problem() is None

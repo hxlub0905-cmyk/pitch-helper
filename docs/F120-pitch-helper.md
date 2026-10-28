@@ -2130,3 +2130,63 @@ finalizing`，core dumped；3.9／3.12（CI）與 3.13（本機）沒事。本�
 main 的 commit（fa06b09）一樣 abort，換 6.11.2 就乾淨 —— 跟這裡的程式碼無關。
 `requirements.txt`／`pyproject.toml`／CI 三處釘 `PySide6<6.12`，等上游修好再放開。
 廠內機器的 Python 版本不一定，所以不是只釘 CI。
+
+## 37. 一鍵打包停在 `[3/4]`；兩個圖示要驗（使用者 2026-10-28）
+
+使用者雙擊 `build_exe.bat`：
+
+```
+[3/4] Installing requirements.txt + PyInstaller ...
+UnicodeDecodeError: 'cp950' codec can't decode byte 0xe2 in position 22: illegal multibyte sequence
+```
+
+同時要求「確保打包後的 EXE 開啟時與執行時 ICON 都會存在」。
+
+### 37.1 為什麼 pip 讀不動 requirements.txt
+
+§36.5 在 `requirements.txt` 裡加了中文註解，第一個字是 `⚠`（UTF-8 `e2 9a a0`）——
+位置 22 正好是它。新建的 Python 3.9 venv 帶的是**舊版 pip**，它讀 requirements 檔用
+主控台的 code page（中文 Windows 是 cp950），不是 UTF-8；新版 pip 才改成先試 UTF-8。
+CI 根本不用 pip 讀這個檔（它自己列套件、用 Python 以 UTF-8 對照），開發機的 pip 是
+新的 —— 所以全綠，只有「剛建好的 venv ＋ 中文 Windows」紅。本機用 pip 21.3.1 重現：
+同一個 byte、同一個位置。
+
+修法兩道，各自單獨都過得去（實測）：
+
+* `requirements.txt` 改成**純 ASCII**（註解改英文，細節指回 §36.5）。
+* `build_exe.bat` 叫 pip 時加 `-X utf8`（UTF-8 模式下舊版 pip 也照 UTF-8 讀）——
+  給「有人在記事本裡又加了一行中文」的那一天。
+
+`tests/test_build_exe.py::test_pip_can_read_requirements_txt_on_a_chinese_windows`
+兩道都守；把任一道拿掉它就紅（實測）。
+
+### 37.2 兩個圖示，兩種「安靜地不見」
+
+exe 有**兩個**圖示，不見的時候都不報錯：
+
+| 圖示 | 在哪裡看到 | 從哪裡來 | 不見的樣子 |
+|---|---|---|---|
+| exe 檔案的 | 檔案總管、雙擊之前 | exe 的資源（PyInstaller `--icon`） | 沒給 `--icon` → PyInstaller **自己的**預設圖示 |
+| 視窗的 | 標題列、工作列、Alt+Tab | 程式執行時用 `pitch.svg` 畫 | svg plugin 沒打包進去 → `QIcon` 是空的、視窗照開 |
+
+第二列是實測的：在打包出來的程式裡拿掉 `iconengines/qsvgicon` 與
+`imageformats/qsvg` 兩個 plugin，圖示就是空的，沒有任何訊息。
+
+做了三件事（`tools/build_exe.py`）：
+
+1. **產不出 `.ico` 就不打包。** 以前是印一句警告、打一個預設圖示的 exe。
+2. **讀 exe 本身**（`exe_icon`，PE 資源節的 RT_GROUP_ICON）：每一張的邊長與位元組數
+   都要跟剛產的 `.ico` 一樣 —— 只比「有沒有圖示」會被 PyInstaller 的預設圖示騙過。
+   解析器拿 32 個真的 Windows 執行檔跟 `pefile` 對過（32／64 位元、ARM64、
+   PyInstaller 自己的 bootloader），全部一致。
+3. **開一次 exe 問它本人**：`PitchHelper.exe --check-icon <檔案>` 不開視窗，跑
+   `branding.icon_problem()`（真的畫 16／32／48／256 px，看有沒有不透明的像素），
+   把 `ok` 或理由寫進檔案（`--windowed` 的 exe 沒有 stdout）。開不起來、逾時，各有
+   各的說法 —— 「開不起來」不能被說成「沒有圖示」。
+
+三件都過才印 `OK`；`--no-check` 跳過 2、3（例如防毒軟體每次都把新 exe 掃很久）。
+在 Linux 上用 PyInstaller 6.22.3 把整條跑過一次（onefile 與 onedir），並驗過拿掉
+plugin 的那一包會 `FAILED`。Windows 上的第 2 步這裡跑不到（PyInstaller 不能跨平台
+打包），靠的是上面那 32 個執行檔。
+
+⚠ 檔案總管有圖示快取：驗過了但看到的還是舊圖示，是快取，不是 exe —— 換個檔名再看。

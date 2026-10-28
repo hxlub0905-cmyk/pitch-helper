@@ -10,6 +10,7 @@
     python tools/build_exe.py              # dist/PitchHelper.exe（單一檔案）
     python tools/build_exe.py --onedir     # dist/PitchHelper/PitchHelper.exe（資料夾）
     python tools/build_exe.py --console    # 多一個主控台視窗，看得到 traceback
+    python tools/build_exe.py --no-check   # 打完不開一次 exe 驗圖示
 
 為什麼設定寫在這裡而不是 .bat 裡
 --------------------------------
@@ -30,7 +31,18 @@
   ``Unable to find '…/build/assets/a.svg'``）。只有進入點那一個它會自己換算。
 * **exe 的圖示從 ``pitch.svg`` 當場產**（:func:`make_icon`），不 commit 一份
   ``.ico``：二進位檔進不了搬運包（``make_text_bundle`` 只收 UTF-8 文字），
-  而且兩份來源一定會漂。
+  而且兩份來源一定會漂。**產不出來就不打包**（2026-10-28 以前是印一句警告、
+  打一個預設圖示的 exe —— 使用者：「確保打包後的 EXE 開啟時與執行時 ICON
+  都會存在」）。
+* **打完先驗兩個圖示才說 OK**（:func:`exe_problem`）。exe 有兩個圖示，而兩個
+  不見的時候都**不會報錯**：
+  - 檔案總管裡那一個（雙擊之前看到的）是 exe 本身的資源 —— :func:`exe_icon`
+    讀出來，跟剛產的 ``.ico`` 逐張比；
+  - 開起來之後視窗與工作列上那一個是程式自己用 SVG 畫的，svg plugin 沒被
+    打包進去就是空的 —— :func:`runtime_icon_problem` 用 ``--check-icon``
+    開一次 exe（不開視窗）問它本人。
+
+  ``--no-check`` 跳過這一步。
 * ``--noupx``：UPX 壓過的 Qt DLL 常常載不起來（PyInstaller 的已知問題），
   而 PATH 上剛好有 UPX 的時候 PyInstaller 會自己去用它。
 * 預設 ``--windowed``（沒有黑色主控台視窗）。代價是當掉的時候看不到訊息 ——
@@ -44,7 +56,7 @@ import os
 import struct
 import subprocess
 import sys
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 #: exe 的名字（也是 ``dist/`` 底下的資料夾名）。
 APP_NAME = "PitchHelper"
@@ -64,6 +76,23 @@ ICON_SIZES = (16, 24, 32, 48, 64, 128, 256)
 
 #: 不算資料檔的副檔名。
 _CODE_EXT = (".py", ".pyc", ".pyo")
+
+#: 叫 exe 不開視窗、只回答「圖示畫不畫得出來」的旗標。跟
+#: ``pitchapp/ui/pitch_helper.py`` 的 ``CHECK_ICON_FLAG`` 是同一個字串 —— 這裡
+#: 不 import 它（那會把整個 UI 拉進來），`tests/test_build_exe.py` 拿這一個去
+#: 真的跑一次程式，兩邊對不上就紅。
+CHECK_ICON_FLAG = "--check-icon"
+
+#: 等那一次自我檢查最多幾秒。單一 exe 每次開都要先解壓一百多 MB，防毒軟體
+#: 第一次看到新的 exe 還會整個掃一遍。
+CHECK_TIMEOUT = 300
+
+#: PE 資源型別 ``RT_GROUP_ICON``：一組圖示有哪些尺寸。檔案總管顯示的就是 exe
+#: 裡的第一組。
+_RT_GROUP_ICON = 14
+
+#: 資源目錄項目的最高位元：1 = 指到下一層目錄，0 = 指到資料。
+_SUBDIR = 0x80000000
 
 
 def repo_root() -> str:
@@ -130,9 +159,9 @@ def ico_bytes(pngs: List[Tuple[int, bytes]]) -> bytes:
 def make_icon(svg_path: str, ico_path: str) -> None:
     """``pitch.svg`` → ``.ico``。做不出來就拋例外，**理由在例外裡**。
 
-    要不要因此停下來是呼叫端（:func:`main`）的事：少一顆圖示不值得讓整個打包
-    失敗，但「為什麼沒有圖示」一定要印出來 —— 只講「做不出來」的話，下一個人
-    只能從頭猜（2026-09-30 在 Wine 上實際遇到：原因是 QtSvg 的 DLL 載不起來）。
+    呼叫端（:func:`main`）會因此停下來不打包，而「為什麼沒有圖示」一定要印
+    出來 —— 只講「做不出來」的話，下一個人只能從頭猜（2026-09-30 在 Wine 上
+    實際遇到：原因是 QtSvg 的 DLL 載不起來）。
 
     不需要 ``QApplication``：畫在 ``QImage`` 上、而且那張 SVG 沒有文字，
     所以用不到字型資料庫。
@@ -151,6 +180,137 @@ def make_icon(svg_path: str, ico_path: str) -> None:
     with open(tmp, "wb") as f:
         f.write(data)
     os.replace(tmp, ico_path)
+
+
+def _icon_dir(data: bytes, at: int, entry_size: int) -> List[Tuple[int, int]]:
+    """一份 ICONDIR（``.ico`` 檔頭，每張 16 bytes）或 GRPICONDIR（exe 裡的，
+    每張 14 bytes）→ 每張的 ``(邊長, 位元組數)``。兩種的前 12 bytes 一樣
+    （:func:`ico_bytes` 寫的那幾欄），PyInstaller 就是照抄過去的。"""
+    count = struct.unpack_from("<H", data, at + 4)[0]
+    out = []
+    for i in range(count):
+        e = at + 6 + entry_size * i
+        out.append((data[e] or 256, struct.unpack_from("<I", data, e + 8)[0]))
+    return out
+
+
+def ico_icon(path: str) -> List[Tuple[int, int]]:
+    """``.ico`` 裡每張的 ``(邊長, 位元組數)`` —— 拿來跟 :func:`exe_icon` 比。"""
+    with open(path, "rb") as f:
+        return _icon_dir(f.read(), 0, 16)
+
+
+def exe_icon(path: str) -> Optional[List[Tuple[int, int]]]:
+    """exe 裡第一組圖示（檔案總管顯示的那一組）每張的 ``(邊長, 位元組數)``。
+
+    不是 Windows 執行檔（PE）回 ``None``；是 PE 但沒有圖示回 ``[]``；檔案壞掉
+    拋 ``ValueError``／``struct.error``。
+
+    為什麼自己讀：PyInstaller 說 OK 不代表**我們的**圖示進去了 —— 沒給
+    ``--icon`` 的時候它放的是它自己的預設圖示，而那不會報錯，只會在檔案總管裡
+    看起來不對。反過來，檔案總管有圖示快取，重打之後**看到舊圖示不代表沒換到**。
+    兩件事都只有讀 exe 本身答得了：每一張的邊長與位元組數都跟剛產的 ``.ico``
+    一樣，就是同一顆圖示。
+
+    格式是 PE/COFF 規格的資源節：型別 → 名字 → 語言三層目錄，最底下是一份
+    GRPICONDIR。（2026-10-28 拿 32 個真的 Windows 執行檔跟 ``pefile`` 對過：
+    32／64 位元、ARM64、PyInstaller 自己的 bootloader。）
+    """
+    with open(path, "rb") as f:
+        data = f.read()
+    if data[:2] != b"MZ":
+        return None
+    pe = struct.unpack_from("<I", data, 0x3C)[0]
+    if data[pe:pe + 4] != b"PE\0\0":
+        return None
+    n_sections = struct.unpack_from("<H", data, pe + 6)[0]
+    opt_size = struct.unpack_from("<H", data, pe + 20)[0]
+    opt = pe + 24                                     # optional header
+    magic = struct.unpack_from("<H", data, opt)[0]
+    # data directory 的第 2 項是資源；它在 optional header 裡的位置 32 位元
+    # （PE32，0x10B）與 64 位元（PE32+）不一樣。
+    rsrc = struct.unpack_from("<I", data,
+                              opt + (96 if magic == 0x10B else 112) + 16)[0]
+    if not rsrc:
+        return []
+    # 每一節：(VirtualSize, VirtualAddress, SizeOfRawData, PointerToRawData)
+    sections = [struct.unpack_from("<IIII", data, opt + opt_size + 40 * i + 8)
+                for i in range(n_sections)]
+
+    def at(rva: int) -> int:                          # 記憶體位址 → 檔案位置
+        for vsize, va, raw_size, raw in sections:
+            if va <= rva < va + max(vsize, raw_size):
+                return raw + rva - va
+        raise ValueError("address %#x is in no section" % rva)
+
+    base = at(rsrc)
+
+    def entries(offset: int) -> List[Tuple[int, int]]:
+        named, ids = struct.unpack_from("<HH", data, base + offset + 12)
+        return [struct.unpack_from("<II", data, base + offset + 16 + 8 * i)
+                for i in range(named + ids)]
+
+    def first(entry_list: List[Tuple[int, int]]) -> int:
+        if not entry_list or not entry_list[0][1] & _SUBDIR:
+            raise ValueError("the resource tree is not type/name/language")
+        return entry_list[0][1] & ~_SUBDIR
+
+    for kind, ptr in entries(0):
+        if kind == _RT_GROUP_ICON and ptr & _SUBDIR:
+            names = entries(ptr & ~_SUBDIR)
+            langs = entries(first(names))
+            if not langs or langs[0][1] & _SUBDIR:
+                raise ValueError("the icon group has no data")
+            grp = at(struct.unpack_from("<I", data, base + langs[0][1])[0])
+            return _icon_dir(data, grp, 14)
+    return []
+
+
+def runtime_icon_problem(cmd: Sequence[str], answer_path: str,
+                         timeout: float = CHECK_TIMEOUT) -> Optional[str]:
+    """跑一次 ``cmd --check-icon answer_path``：程式不開視窗，自己畫一次視窗
+    圖示，把答案寫進 ``answer_path``。畫得出來回 ``None``，否則回理由。
+
+    ``cmd`` 是打好的 exe；測試裡是 ``python main.py`` —— 同一條路。
+    """
+    if os.path.exists(answer_path):
+        os.remove(answer_path)                        # 舊的答案不算數
+    try:
+        r = subprocess.run(list(cmd) + [CHECK_ICON_FLAG, answer_path],
+                           stdin=subprocess.DEVNULL, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return ("the program did not answer within %d s. Antivirus scanning "
+                "a new exe can take that long: run it once by hand, or build "
+                "again with --no-check" % timeout)
+    except OSError as e:
+        return "the program could not be started (%s)" % e
+    try:
+        with open(answer_path, encoding="utf-8") as f:
+            answer = f.read().strip()
+    except OSError:
+        return ("the program exited with code %d without answering, so it "
+                "probably does not start at all. Build again with --console "
+                "and run it to see why" % r.returncode)
+    return None if answer == "ok" else "the window icon: " + answer
+
+
+def exe_problem(exe: str, ico: str, answer_path: str) -> Optional[str]:
+    """打好的 exe 兩個圖示都在回 ``None``，否則回理由（見模組說明）。
+
+    ``ico``：交給 PyInstaller 的那一顆；``answer_path``：
+    :func:`runtime_icon_problem` 那一次自我檢查寫答案的地方。
+    """
+    try:
+        got = exe_icon(exe)
+    except (ValueError, struct.error) as e:
+        return "could not read the icon out of %s (%s)" % (exe, e)
+    if got is not None and got != ico_icon(ico):
+        if not got:
+            return ("%s has no icon, so Explorer shows the generic exe one"
+                    % exe)
+        return ("the icon in %s is not the one made from %s (it has %s px)"
+                % (exe, ICON_SVG, "/".join(str(n) for n, _ in got)))
+    return runtime_icon_problem([exe], answer_path)
 
 
 def pyinstaller_args(root: str, onedir: bool = False, console: bool = False,
@@ -195,6 +355,9 @@ def main(argv=None) -> int:
     ap.add_argument("--console", action="store_true",
                     help="keep a console window, so a crash shows its "
                          "traceback")
+    ap.add_argument("--no-check", action="store_true",
+                    help="do not start the new exe once to check that it "
+                         "has its icons")
     a = ap.parse_args(argv)
 
     if importlib.util.find_spec("PyInstaller") is None:
@@ -205,15 +368,15 @@ def main(argv=None) -> int:
         return 2
 
     root = repo_root()
-    ico: Optional[str] = os.path.join(root, "build", APP_NAME + ".ico")
+    ico = os.path.join(root, "build", APP_NAME + ".ico")
     try:
         make_icon(os.path.join(root, ICON_SVG), ico)
         print("icon: %s" % ico)
-    except Exception as e:              # 少一顆圖示不值得讓整個打包失敗
-        print("warning: could not make the icon from %s (%s: %s)\n"
-              "         the exe will use the default icon"
+    except Exception as e:              # 理由一定要印出來（見 make_icon）
+        print("\nCould not make the icon from %s (%s: %s)\n"
+              "Not building: the exe would get the default icon."
               % (ICON_SVG, type(e).__name__, e))
-        ico = None
+        return 1
 
     args = pyinstaller_args(root, onedir=a.onedir, console=a.console,
                             icon=ico)
@@ -234,6 +397,25 @@ def main(argv=None) -> int:
     # --onedir 的 exe 本身只是一個幾 MB 的啟動器 —— 報它的大小會讓人以為
     # 只要搬那一個檔案，所以報的是整個資料夾。
     size = _tree_size(os.path.dirname(out)) if a.onedir else os.path.getsize(out)
+    if a.no_check:
+        print("\nicons: not checked (--no-check)")
+    else:
+        print("\nchecking the icons: starting %s once, without a window ..."
+              % APP_NAME)
+        problem = exe_problem(out, ico, os.path.join(root, "build",
+                                                     "icon-check.txt"))
+        if problem:
+            print("\nFAILED: %s\n\n%s is there, but it did not pass the "
+                  "icon check." % (problem, out))
+            return 1
+        if os.name == "nt":
+            print("icons: OK -- in the exe file (%s px) and in the window"
+                  % "/".join(str(n) for n in ICON_SIZES))
+            print("       Explorer caches icons: if it still shows the old "
+                  "one, rename the exe or look again later.")
+        else:
+            print("icons: OK -- in the window (not a Windows exe, so it has "
+                  "no file icon)")
     print("\nOK: %s  (%.0f MB)" % (out, size / 1024.0 / 1024.0))
     if a.onedir:
         print("Copy the whole %s folder -- the .exe does not run on its own."
